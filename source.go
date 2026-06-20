@@ -141,6 +141,15 @@ func (m *astMap) significant(i int) bool {
 	return m.tokenIndexAt(i) >= 0
 }
 
+// insignificant reports whether byte i is real input that lies outside every
+// significant token — i.e. whitespace, a comment, or an auto-inserted
+// semicolon. These are the freely skippable "Insignificant Text Spans": the
+// per-character backtracker may step over any one of them. End-of-text is not
+// insignificant (there is no byte there to skip).
+func (m *astMap) insignificant(i int) bool {
+	return i >= 0 && i < len(m.src) && m.tokenIndexAt(i) < 0
+}
+
 // nextSignificant advances pos forward over insignificant debris and returns
 // the first significant byte index (or len(src) if none remains).
 func (m *astMap) nextSignificant(pos int) int {

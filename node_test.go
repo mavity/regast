@@ -114,3 +114,86 @@ func TestNodeGolden(t *testing.T) {
 		})
 	}
 }
+
+// TestNodePerCharSkip exercises the character-by-character skip model: comments
+// and whitespace are unified "Insignificant Text Spans" that the backtracker may
+// step over one byte at a time (Branch B) or consume literally (Branch A). This
+// lets a pattern (a) ignore comments that sit between code tokens inside a node,
+// (b) reach through leading whitespace/comments to literal text, and (c) tolerate
+// source whitespace that is more lax than the pattern — including inside a
+// comment, where the bytes are just more insignificant spans. The token-seam
+// rule (no fusing two distinct word tokens without a separator) still holds.
+func TestNodePerCharSkip(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		pat  string
+		repl string
+		want string
+	}{
+		// A comment sitting between two operands lives inside the binary-expr
+		// node's byte span; the engine steps over it to align `+`.
+		{"comment between operands", "package p\nfunc f() { _ = a /* c */ + b }\n", `⦃(\w+) \+ (\w+)⦄`, `$3 + $2`, "package p\nfunc f() { _ = b + a }\n"},
+		{"block comment between selector parts", "package p\nvar _ = unix /* x */ . Major\n", `⦃unix\.Major⦄`, `syscall.Major`, "package p\nvar _ = syscall.Major\n"},
+
+		// Reaching past a node into a trailing line comment: the bytes of
+		// `// TODO` are insignificant, so Branch A consumes them literally.
+		{"match trailing line comment", "package p\nvar _ = x // TODO\n", `⦃x⦄ // TODO`, `y // DONE`, "package p\nvar _ = y // DONE\n"},
+		// Source spacing is more lax than the pattern: extra spaces before and
+		// inside the comment are skipped one byte at a time.
+		{"lax spacing around line comment", "package p\nvar _ = x  //   TODO\n", `⦃x⦄ // TODO`, `y // DONE`, "package p\nvar _ = y // DONE\n"},
+		// Internal block-comment spacing flexes the same way (source >= pattern).
+		{"lax spacing inside block comment", "package p\nvar _ = x /*  hi  */ + z\n", `⦃x⦄ /* hi */`, `y /* yo */`, "package p\nvar _ = y /* yo */ + z\n"},
+		// ASYMMETRIC BUG: Pattern has space, source does NOT.
+		{"pattern whitespace > source", "package p\nvar _ = x/*hi*/ + z\n", `⦃x⦄ /* hi */`, `y /* yo */`, "package p\nvar _ = y /* yo */ + z\n"},
+
+		// Comment sequence skipping: any debris between code tokens.
+		{"multiple comments alignment", "package p\nvar _ = x /* c1 */ /* c2 */ + z\n", `⦃x⦄ \+ z`, `y + z`, "package p\nvar _ = y + z\n"},
+
+		// Whitespace-insensitive code matching across a comment still binds the
+		// whole call node (greedy node-end selection is unaffected).
+		{"comment inside call args", "package p\nfunc f() { log.Printf(/*fmt*/ \"a\") }\n", `⦃log\.Printf(\(.*\))⦄`, `logger.Log$2`, "package p\nfunc f() { logger.Log(/*fmt*/ \"a\") }\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			re, err := Compile(c.pat)
+			if err != nil {
+				t.Fatalf("%s: compile fail: %v", c.name, err)
+			}
+			got := re.ReplaceAllString(c.in, c.repl)
+			if got != c.want {
+				t.Errorf("%s:\n got: %q\nwant: %q", c.name, got, c.want)
+			}
+		})
+	}
+}
+
+// TestNodeSeamRule pins the Token-Stream Boundary invariant: per-character
+// skipping must never fuse two distinct word tokens that the pattern did not
+// explicitly separate. These patterns must find NO match and leave the source
+// untouched.
+func TestNodeSeamRule(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		pat  string
+	}{
+		// `F1` and `int` are separate word tokens; a gapless pattern may not
+		// merge them by skipping the space between.
+		{"no fuse field name and type", "package p\ntype S struct {\n\tF1 int\n}\n", `⦃F1int⦄`},
+		// Same for a var name and its type.
+		{"no fuse var name and type", "package p\nvar xx int\n", `⦃xxint⦄`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			re, err := Compile(c.pat)
+			if err != nil {
+				t.Fatalf("%s: compile fail: %v", c.name, err)
+			}
+			if got := re.ReplaceAllString(c.in, "X"); got != c.in {
+				t.Errorf("%s: expected no match, but source changed:\n got: %q\nwant: %q", c.name, got, c.in)
+			}
+		})
+	}
+}
+

@@ -38,17 +38,21 @@ type nodeFrame struct {
 	parent int32
 }
 
-// nodeCtx is the per-job node-matching cursor: which frame bounds it, plus two
-// transient flags. frame < 0 means "not inside any node-group". It is a small
-// scalar value copied with the job (no array, no heap).
+// nodeCtx is the per-job node-matching cursor. frame < 0 means "not inside any
+// node-group" (but per-character whitespace/comment skipping still applies when
+// the input has a structural map). It is a small scalar value copied with the
+// job (no array, no heap).
 //
-// fresh marks that no significant character has been consumed yet at the current
-// node level (so the first atom skips the junction rule); pendGap marks that an
-// InstGap just validated and crossed a token seam.
+// started becomes true once the match has consumed its first significant byte.
+// While it is false the engine refuses to skip leading debris (so a match never
+// begins on whitespace/comment bytes) and the first significant byte is exempt
+// from the token-seam rule. gapOK records that an explicit separator — a pattern
+// gap (InstGap) or a literally consumed debris byte — has been seen since the
+// last significant byte, which is what licenses crossing a word|word seam.
 type nodeCtx struct {
 	frame   int32
-	fresh   bool
-	pendGap bool
+	started bool
+	gapOK   bool
 }
 
 func noNode() nodeCtx { return nodeCtx{frame: -1} }
@@ -80,35 +84,39 @@ func (b *bitState) internFrame(end, parent int32) int32 {
 	return id
 }
 
-// nodeMatchPos applies the node-group whitespace rules to decide where the next
-// significant rune to match begins. It returns the byte position p, the updated
-// context, and ok=false if no legal position exists (the branch must die).
-func (b *bitState) nodeMatchPos(pos int, nctx nodeCtx) (p int, nn nodeCtx, ok bool) {
-	end := b.frameEnd(nctx.frame)
-	switch {
-	case nctx.fresh:
-		// First atom in this node: no junction constraint.
-		nctx.fresh = false
-		nctx.pendGap = false
-		p = b.am.nextSignificant(pos)
-	case nctx.pendGap:
-		// A gap already validated the token seam and advanced pos to it.
-		nctx.pendGap = false
-		p = pos
-	default:
-		// No gap: a word|word token seam may not be crossed (that would merge
-		// or split two identifier tokens). Other seams are free.
-		p = b.am.nextSignificant(pos)
-		if pos > 0 && p < len(b.am.src) &&
-			b.am.tokenIndexAt(pos-1) != b.am.tokenIndexAt(p) &&
-			isWordByte(b.am.src[pos-1]) && isWordByte(b.am.src[p]) {
-			return 0, nctx, false
-		}
+// seamOK enforces the Token-Stream Boundary Rule when about to consume the
+// significant byte at pos: two distinct word tokens may not be fused together
+// unless an explicit separator licensed it. The first significant byte of a
+// match, and any byte reached right after a gap or a consumed debris byte, is
+// always allowed; only an unmediated word|word seam is rejected.
+func (b *bitState) seamOK(pos int, nctx nodeCtx) bool {
+	if !nctx.started || nctx.gapOK {
+		return true
 	}
-	if p >= end {
-		return 0, nctx, false
+	q := b.am.prevSignificantEnd(pos)
+	if q == 0 {
+		return true
 	}
-	return p, nctx, true
+	if b.am.tokenIndexAt(q-1) == b.am.tokenIndexAt(pos) {
+		return true // same token: contiguous bytes, no seam
+	}
+	if isWordByte(b.am.src[q-1]) && isWordByte(b.am.src[pos]) {
+		return false
+	}
+	return true
+}
+
+// consumed updates the cursor after a rune is matched at pos. Consuming a
+// significant byte marks the match as started and clears the gap credit;
+// consuming a debris byte literally counts as an explicit separator.
+func (b *bitState) consumed(pos int, nctx nodeCtx) nodeCtx {
+	if b.am.insignificant(pos) {
+		nctx.gapOK = true
+		return nctx
+	}
+	nctx.started = true
+	nctx.gapOK = false
+	return nctx
 }
 
 const (
@@ -247,10 +255,10 @@ func (b *bitState) shouldVisit(pc uint32, pos int) bool {
 // correctly and guarantees termination without a step cap.
 func (b *bitState) shouldVisitNode(pc uint32, pos int, nctx nodeCtx) bool {
 	var fl uint8
-	if nctx.fresh {
+	if nctx.started {
 		fl |= 1
 	}
-	if nctx.pendGap {
+	if nctx.gapOK {
 		fl |= 2
 	}
 	k := nodeVisitKey{pc: pc, pos: int32(pos), frame: nctx.frame, fl: fl}
@@ -262,8 +270,10 @@ func (b *bitState) shouldVisitNode(pc uint32, pos int, nctx nodeCtx) bool {
 }
 
 // push pushes (pc, pos, arg) onto the job stack if it should be visited. Plain
-// (frame < 0) states use the flat (pc,pos) bitvector; node-region states use the
-// frame-keyed node-visited set, which deduplicates them correctly.
+// programs use the flat (pc,pos) bitvector; whenever the input has a structural
+// map (b.am != nil) every state — even outside a node-group — carries the
+// per-character cursor flags, so it must use the frame-keyed node-visited set
+// to deduplicate correctly.
 func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) {
 	// Only check the visited prune when arg is false.
 	// When arg is true, we are continuing a previous visit.
@@ -271,7 +281,7 @@ func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) 
 		return
 	}
 	if !arg {
-		if nctx.frame >= 0 {
+		if b.am != nil {
 			if !b.shouldVisitNode(pc, pos, nctx) {
 				return
 			}
@@ -280,6 +290,10 @@ func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) 
 		}
 	}
 	b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos, nctx: nctx})
+}
+
+func isPatternSpace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
 // tryBacktrack runs a backtracking search starting at pos.
@@ -320,10 +334,10 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 		// manipulation.
 		goto Skip
 	CheckAndLoop:
-		// Plain states use the flat (pc,pos) bitvector; node-region states use
-		// the frame-keyed node-visited set. Both deduplicate correctly, so the
-		// search terminates without any step cap.
-		if nctx.frame >= 0 {
+		// Plain programs use the flat (pc,pos) bitvector; structural programs
+		// (b.am != nil) carry per-character cursor flags, so they dedup through
+		// the frame-keyed node-visited set. Both terminate without a step cap.
+		if b.am != nil {
 			if !b.shouldVisitNode(pc, pos, nctx) {
 				continue
 			}
@@ -375,66 +389,108 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			goto CheckAndLoop
 
 		case syntax.InstRune:
-			p := pos
-			if nctx.frame >= 0 {
-				var ok bool
-				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+			if b.am != nil {
+				if pos >= b.frameEnd(nctx.frame) {
+					continue
+				}
+				// If this is a whitespace rune in the pattern, it is optionally
+				// skippable: pattern [/* b */] matches source [/* b*/].
+				if len(inst.Rune) == 2 && inst.Rune[0] == inst.Rune[1] && isPatternSpace(inst.Rune[0]) {
+					b.push(re, inst.Out, pos, false, nctx)
+				}
+				if b.am.insignificant(pos) {
+					if nctx.started {
+						b.push(re, pc, pos+1, false, nctx) // Branch B: skip one debris byte
+					}
+				} else if !b.seamOK(pos, nctx) {
 					continue
 				}
 			}
-			r, width := i.step(p)
+			r, width := i.step(pos)
 			if !inst.MatchRune(r) {
 				continue
 			}
-			pos = p + width
+			if b.am != nil {
+				nctx = b.consumed(pos, nctx)
+			}
+			pos += width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRune1:
-			p := pos
-			if nctx.frame >= 0 {
-				var ok bool
-				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+			if b.am != nil {
+				if pos >= b.frameEnd(nctx.frame) {
+					continue
+				}
+				// If this is a whitespace rune in the pattern, it is optionally
+				// skippable: pattern [/* b */] matches source [/* b*/].
+				if isPatternSpace(inst.Rune[0]) {
+					b.push(re, inst.Out, pos, false, nctx)
+				}
+				if b.am.insignificant(pos) {
+					if nctx.started {
+						b.push(re, pc, pos+1, false, nctx) // Branch B: skip one debris byte
+					}
+				} else if !b.seamOK(pos, nctx) {
 					continue
 				}
 			}
-			r, width := i.step(p)
+			r, width := i.step(pos)
 			if r != inst.Rune[0] {
 				continue
 			}
-			pos = p + width
+			if b.am != nil {
+				nctx = b.consumed(pos, nctx)
+			}
+			pos += width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRuneAnyNotNL:
-			p := pos
-			if nctx.frame >= 0 {
-				var ok bool
-				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+			if b.am != nil {
+				if pos >= b.frameEnd(nctx.frame) {
+					continue
+				}
+				if b.am.insignificant(pos) {
+					if nctx.started {
+						b.push(re, pc, pos+1, false, nctx) // Branch B: skip one debris byte
+					}
+				} else if !b.seamOK(pos, nctx) {
 					continue
 				}
 			}
-			r, width := i.step(p)
+			r, width := i.step(pos)
 			if r == '\n' || r == endOfText {
 				continue
 			}
-			pos = p + width
+			if b.am != nil {
+				nctx = b.consumed(pos, nctx)
+			}
+			pos += width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRuneAny:
-			p := pos
-			if nctx.frame >= 0 {
-				var ok bool
-				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+			if b.am != nil {
+				if pos >= b.frameEnd(nctx.frame) {
+					continue
+				}
+				if b.am.insignificant(pos) {
+					if nctx.started {
+						b.push(re, pc, pos+1, false, nctx) // Branch B: skip one debris byte
+					}
+				} else if !b.seamOK(pos, nctx) {
 					continue
 				}
 			}
-			r, width := i.step(p)
+			r, width := i.step(pos)
 			if r == endOfText {
 				continue
 			}
-			pos = p + width
+			if b.am != nil {
+				nctx = b.consumed(pos, nctx)
+			}
+			pos += width
 			pc = inst.Out
 			goto CheckAndLoop
 
@@ -442,15 +498,23 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			if b.am == nil {
 				continue
 			}
+			// A node-group binds to an AST node that starts exactly at pos. If pos
+			// sits on debris, fork the per-character skip branch so the engine can
+			// float over leading whitespace/comments to reach the node start.
+			if nctx.started && pos < b.frameEnd(nctx.frame) && b.am.insignificant(pos) {
+				b.push(re, pc, pos+1, false, nctx) // Branch B
+			}
 			ends := b.am.endsForStart(pos)
 			// Push one branch per candidate node end (ascending, so the largest
 			// is on top of the stack and tried first — greedy). Each branch gets
 			// a fresh interned frame chained to the current one; the exact-landing
 			// check at InstNodeExit decides which actually fits. Nesting depth is
-			// unbounded: the chain lives in the frame arena, not on the job.
+			// unbounded: the chain lives in the frame arena, not on the job. The
+			// outer cursor flags carry inward so a seam at the node's first byte is
+			// judged against the token that preceded the node-group.
 			for k := 0; k < len(ends); k++ {
 				nf := b.internFrame(int32(ends[k]), nctx.frame)
-				b.push(re, inst.Out, pos, false, nodeCtx{frame: nf, fresh: true})
+				b.push(re, inst.Out, pos, false, nodeCtx{frame: nf, started: nctx.started, gapOK: nctx.gapOK})
 			}
 			continue
 
@@ -464,8 +528,10 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			if b.am.nextSignificant(pos) < end {
 				continue
 			}
-			// Restore the parent frame (correct unwind of one nesting level).
-			nctx = nodeCtx{frame: b.frames[nctx.frame].parent}
+			// Restore the parent frame (correct unwind of one nesting level). The
+			// matched node counts as a consumed significant unit: the match has
+			// started and any following word|word seam needs a fresh separator.
+			nctx = nodeCtx{frame: b.frames[nctx.frame].parent, started: true, gapOK: false}
 			pos = end
 			pc = inst.Out
 			goto CheckAndLoop
@@ -474,13 +540,16 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			if b.am == nil {
 				continue
 			}
+			// A gap is a zero-width separator marker: the whitespace/comment bytes
+			// themselves are stepped over by the per-character skip branches. It is
+			// illegal only if it falls strictly inside one significant token (which
+			// would split that token across the gap).
+			q := b.am.prevSignificantEnd(pos)
 			r := b.am.nextSignificant(pos)
-			if !b.am.gapBoundary(pos-1, r) {
+			if q > 0 && r < len(b.am.src) && b.am.tokenIndexAt(q-1) == b.am.tokenIndexAt(r) {
 				continue
 			}
-			pos = r
-			nctx.pendGap = true
-			nctx.fresh = false
+			nctx.gapOK = true
 			pc = inst.Out
 			goto CheckAndLoop
 
