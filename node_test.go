@@ -196,4 +196,3 @@ func TestNodeSeamRule(t *testing.T) {
 		})
 	}
 }
-
