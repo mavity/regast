@@ -147,34 +147,55 @@ opcodes, so every existing `syntax` test stays green.
     the only captures are real ones, submatch indices need **zero** correction —
     this is the concrete fix to the index-corruption objection.
 
-### 2. Source preprocessing (`source.go`, ported from `regast-poc/preprocess.go`)
+### 2. Source preprocessing (`source.go`)
 
-- `type astMap struct { … }`: the bytes, comment spans, and the flat
-  node-boundary table (`start`/`end`, sorted, binary-searchable).
-- Methods used by the engine:
-  - `endsForStart(pos) []int` — candidate node ends starting exactly at `pos`
-    (largest-first iteration order at the call site).
-  - `significant(i) bool` / `nextSignificant(pos) int` — skip whitespace/comments.
-  - `hasStructuralDivergence(L, R int) bool` — the gap invariant (below).
-- Error-tolerant parse (`ParseComments | AllErrors | SkipObjectResolution`);
-  partial AST is used; only a wholly unusable parse errors out.
-- Unexported; never surfaced through the public API.
+Built from a **single up-front pass** that harvests *both* structures the Go
+front end already produces — no second tokenizer, no raw-character heuristics:
 
-### 3. The gap rule as a native instruction
+- A **Unified Significant-Token Map**, from `go/scanner` (the same pass that
+  finds comments): the byte spans `[start,end)` of every *significant* lexical
+  token — identifiers, keywords, literals, **and** punctuation/operators
+  (`+`, `.`, `(`, `;`, …) — while **discarding insignificant debris**
+  (whitespace, comments, and synthetic auto-inserted semicolons whose literal is
+  `"\n"`). Token end is `start + len(lit)` for literal tokens, else
+  `start + len(tok.String())` for operators/delimiters.
+- The **AST node table**, from `go/parser` (`ParseComments | AllErrors |
+  SkipObjectResolution`): byte spans of every AST node, for resolving
+  node-groups. Error-tolerant; partial AST is used; only a wholly unusable parse
+  errors out.
 
-`InstGap` enforces the **structural-divergence invariant**: pattern whitespace
-must straddle a real AST cleavage. At branch-local `pos`:
+`type astMap struct { … }` holds both tables (flat, sorted, binary-searchable).
+Methods used by the engine:
+  - `endsForStart(pos) []int` — candidate AST node ends starting exactly at
+    `pos` (tried largest-first at the call site).
+  - `significant(i) bool` — byte `i` lies inside a significant token.
+  - `nextSignificant(pos) int` — advance over insignificant debris.
+  - `gapBoundary(L, R int) bool` — the gap invariant (below).
+
+Unexported; never surfaced through the public API.
+
+### 3. The gap rule as a native instruction — the Token-Stream Boundary Rule
+
+A pattern gap is a **single, rigid invariant**: it is valid *iff the text cursor
+sits exactly on a seam between two distinct significant tokens.* This unifies AST
+leaves and punctuation under one language-precise timeline, so it is correct
+around operators (where AST nodes don't exist) yet still forbids splitting a
+single token.
+
+`InstGap` at branch-local `pos`:
 
 ```
-R := astMap.nextSignificant(pos)              // swallow ws/comments forward
-if !astMap.hasStructuralDivergence(pos-1, R)  // L,R inside the same leaf token?
+R := astMap.nextSignificant(pos)        // swallow ws/comments/debris forward
+if !astMap.gapBoundary(pos-1, R)        // are L and R the same token? (mid-token)
     → this DFS branch dies (continue)
-pos = R; pc = inst.Out                         // boundary valid; advance
+pos = R; pc = inst.Out                  // crisp token seam; advance
 ```
 
-`hasStructuralDivergence(L,R)` is true iff some node ends at `L` **and** some
-node starts at `R` (i.e. `L` and `R` are not bound within the same narrowest
-leaf). Precomputed from the boundary table; no live AST walking.
+`gapBoundary(L, R)` is true iff `L` and `R` fall in **different** significant
+tokens (`tokenIndexAt(L) != tokenIndexAt(R)`). Worked cases:
+- `x int`: `Ident x` | `Ident int` — distinct tokens ⇒ **valid**.
+- `a + b`: `Ident a` | `token.ADD "+"` | `Ident b` — distinct tokens ⇒ **valid**.
+- `va|riable`: both sides inside one `Ident` ⇒ same token ⇒ **invalid**, backtrack.
 
 For in-node `InstRune`, before `i.step(pos)` the branch advances `pos` over
 insignificant bytes and checks `pos < job.nodeEnd`. (Legal: the job owns `pos`.)
