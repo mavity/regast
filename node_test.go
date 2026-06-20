@@ -24,7 +24,7 @@ func TestNodeGolden(t *testing.T) {
 		{"swap binary operands", "package p\n\nfunc f() { _ = a + b }", `⦃(\w+) \+ (\w+)⦄`, `$3 + $2`, "package p\n\nfunc f() { _ = b + a }"},
 
 		// --- Function and Call Refactorings ---
-		{"replace call name", "package p\n\nfunc main() {\n\tlog.Printf(\"hello\")\n}\n", `⦃log\.Printf⦄(\(.*\))`, `logger.Log$2`, "package p\n\nfunc main() {\n\tlogger.Log(\"hello\")\n}\n"},
+		{"replace call name", "package p\n\nfunc main() {\n\tlog.Printf(\"hello\")\n}\n", `⦃log\.Printf(\(.*\))⦄`, `logger.Log$2`, "package p\n\nfunc main() {\n\tlogger.Log(\"hello\")\n}\n"},
 		{"swap call arguments", "package p\n\nfunc f() { move(a, b) }", `⦃move\(⦃\w+⦄, ⦃\w+⦄\)⦄`, `move($3, $2)`, "package p\n\nfunc f() { move(b, a) }"},
 		{"rename method and receiver", "package p\n\nfunc (r *S) Old() {}\n", `func\s+\(⦃\w+⦄\s+⦃\*S⦄\)\s+⦃Old⦄`, `func ($1 $2) New`, "package p\n\nfunc (r *S) New() {}\n"},
 
@@ -93,6 +93,13 @@ func TestNodeGolden(t *testing.T) {
 		{"add trailing comma to struct", "package p\nvar s = S{F1: 1}\n", `S\{⦃F1: 1⦄\}`, `S{F1: 1,}`, "package p\nvar s = S{F1: 1,}\n"},
 		{"rewrite bitwise op", "package p\nfunc f() { x := a &^ b; _ = x }\n", `⦃a &\^ b⦄`, `a & (^b)`, "package p\nfunc f() { x := a & (^b); _ = x }\n"},
 		{"rename complex number", "package p\nfunc f() { _ = 1 + 2i }\n", `⦃1 \+ 2i⦄`, `complex(1, 2)`, "package p\nfunc f() { _ = complex(1, 2) }\n"},
+
+		// --- Call expression robustness (nested, greedy match avoidance) ---
+		{"call with nested parens", "package p\nfunc f() { log.Printf(\"fmt\", get(\"nested\")) }\n", `⦃log\.Printf(\(.*\))⦄`, `logger.Log$2`, "package p\nfunc f() { logger.Log(\"fmt\", get(\"nested\")) }\n"},
+		{"nested call in expression", "package p\nfunc f() { check(log.Printf(\"a\")) }\n", `⦃log\.Printf(\(.*\))⦄`, `logger.Log$2`, "package p\nfunc f() { check(logger.Log(\"a\")) }\n"},
+		{"multiple calls same line", "package p\nfunc f() { a(1); b(2) }\n", `⦃a(\(.*\))⦄`, `x$2`, "package p\nfunc f() { x(1); b(2) }\n"},
+		{"call with multi-line args", "package p\nfunc f() {\n\tlog.Printf(\n\t\t\"msg\",\n\t\targ,\n\t)\n}\n", `⦃log\.Printf(\(.*\))⦄`, `logger.Log$2`, "package p\nfunc f() {\n\tlogger.Log(\n\t\t\"msg\",\n\t\targ,\n\t)\n}\n"},
+		{"greedy match avoidance", "package p\nfunc f() {\n\tlog.Printf(\"a\")\n\tfmt.Println(\"b\")\n}\n", `⦃log\.Printf(\(.*\))⦄`, `Log$2`, "package p\nfunc f() {\n\tLog(\"a\")\n\tfmt.Println(\"b\")\n}\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -19,10 +19,12 @@ re := regast.MustCompile(`⦃(\w+) \+ (\w+)⦄`)
 out := re.ReplaceAllString(src, `$3 + $2`)
 ```
 
-### 3. Wrap a function call
+### 3. Wrap a function call (stays inside its node)
 ```go
-re := regast.MustCompile(`⦃log\.Printf⦄(\(.*\))`)
-out := re.ReplaceAllString(src, `logger.Log$1`)
+re := regast.MustCompile(`⦃log\.Printf(\(.*\))⦄`)
+// Because it is wrapped in ⦃…⦄, the (.*) will not greedily 
+// skip past the end of the call expression node.
+out := re.ReplaceAllString(src, `logger.Log$2`)
 ```
 
 ### 4. Match a specific field in a struct type
