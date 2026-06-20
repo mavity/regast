@@ -1,5 +1,59 @@
 # regast — node-aware `regexp`, natively integrated
 
+`regast` is a drop-in replacement for the Go standard library's `regexp` package that adds **AST node-group** support. It allows you to write regular expressions that understand Go code structure, ignoring insignificant whitespace and comments while honoring lexical token boundaries.
+
+## Casual Examples
+
+### 1. Rename a qualified identifier (ignores spacing)
+```go
+re := regast.MustCompile(`⦃unix\.Major⦄`)
+// Both "unix.Major" and "unix  .  Major" match and are replaced.
+out := re.ReplaceAllString(src, `syscall.Major`)
+```
+
+### 2. Swap binary operands
+```go
+re := regast.MustCompile(`⦃(\w+) \+ (\w+)⦄`)
+// Matches "a+b", "a + b", "a /* comment */ + b"
+// $2 and $3 are the operand captures; $1 is the whole node-group text.
+out := re.ReplaceAllString(src, `$3 + $2`)
+```
+
+### 3. Wrap a function call
+```go
+re := regast.MustCompile(`⦃log\.Printf⦄(\(.*\))`)
+out := re.ReplaceAllString(src, `logger.Log$1`)
+```
+
+### 4. Match a specific field in a struct type
+```go
+re := regast.MustCompile(`⦃Field int⦄`)
+out := re.ReplaceAllString(src, `NewField int64`)
+```
+
+### 5. Simplify complex error checking
+```go
+// Replace an error check block with a single-line check function
+re := regast.MustCompile(`if ⦃err != nil⦄ { return err }`)
+out := re.ReplaceAllString(src, `check($1)`)
+```
+
+## Running Tests
+
+To run all tests for `regast`, including the syntax fork and the node-aware engine:
+
+```powershell
+go test ./mohabbat/regast/ ./mohabbat/regast/syntax/
+```
+
+For verbose output on node-specific tests:
+
+```powershell
+go test -v ./mohabbat/regast/ -run TestNode
+```
+
+---
+
 This package is a **vendored copy of Go's `regexp`** (cloned as a subtree),
 extended so a pattern may contain **node-groups** — `⦃ … ⦄` — that match a whole
 Go AST node with whitespace/comment-insensitive semantics. The proof-of-concept
