@@ -28,58 +28,63 @@ type job struct {
 	nctx nodeCtx
 }
 
-// maxNodeNest bounds node-group nesting depth carried on a job. Real patterns
-// nest a handful of levels at most.
-const maxNodeNest = 8
+// nodeFrame is one level of node-group nesting: the bounding AST node end and
+// the index of the parent frame (-1 if none). Frames live in a per-search arena
+// (bitState.frames) and are interned, so identical chains share one index. This
+// gives unbounded nesting depth with no per-fork heap allocation, and lets the
+// visited prune key on the exact bound chain (not just the innermost end).
+type nodeFrame struct {
+	end    int32
+	parent int32
+}
 
-// nodeCtx is the per-branch stack of bounding AST node ends while matching
-// inside node-groups. It is a flat value (no heap), copied with the job.
-// fresh marks that no significant character has been consumed yet at the
-// current node level (so the first atom skips the junction rule); pendGap marks
-// that an InstGap just validated and crossed a token seam.
+// nodeCtx is the per-job node-matching cursor: which frame bounds it, plus two
+// transient flags. frame < 0 means "not inside any node-group". It is a small
+// scalar value copied with the job (no array, no heap).
+//
+// fresh marks that no significant character has been consumed yet at the current
+// node level (so the first atom skips the junction rule); pendGap marks that an
+// InstGap just validated and crossed a token seam.
 type nodeCtx struct {
-	ends    [maxNodeNest]int32
-	depth   int8
+	frame   int32
 	fresh   bool
 	pendGap bool
 }
 
-func (n nodeCtx) top() int32 {
-	if n.depth <= 0 {
-		return 1<<31 - 1
-	}
-	return n.ends[n.depth-1]
-}
-
-func (n nodeCtx) pushEnd(end int32) nodeCtx {
-	if n.depth < maxNodeNest {
-		n.ends[n.depth] = end
-		n.depth++
-		n.fresh = true
-		n.pendGap = false
-	}
-	return n
-}
-
-func (n nodeCtx) popEnd() nodeCtx {
-	if n.depth > 0 {
-		n.depth--
-	}
-	n.fresh = false
-	n.pendGap = false
-	return n
-}
+func noNode() nodeCtx { return nodeCtx{frame: -1} }
 
 // isWordByte reports whether c is an ASCII identifier byte.
 func isWordByte(c byte) bool {
 	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
+// frameEnd returns the bounding node end of a frame (or +inf for frame < 0).
+func (b *bitState) frameEnd(frame int32) int {
+	if frame < 0 {
+		return 1<<31 - 1
+	}
+	return int(b.frames[frame].end)
+}
+
+// internFrame returns the canonical index of the frame {end, parent}, creating
+// it in the arena on first sight. Interning bounds the search: identical chains
+// collapse to one index, so the visited prune can deduplicate them.
+func (b *bitState) internFrame(end, parent int32) int32 {
+	key := uint64(uint32(end))<<32 | uint64(uint32(parent))
+	if id, ok := b.frameIntern[key]; ok {
+		return id
+	}
+	id := int32(len(b.frames))
+	b.frames = append(b.frames, nodeFrame{end: end, parent: parent})
+	b.frameIntern[key] = id
+	return id
+}
+
 // nodeMatchPos applies the node-group whitespace rules to decide where the next
 // significant rune to match begins. It returns the byte position p, the updated
 // context, and ok=false if no legal position exists (the branch must die).
 func (b *bitState) nodeMatchPos(pos int, nctx nodeCtx) (p int, nn nodeCtx, ok bool) {
-	end := int(nctx.top())
+	end := b.frameEnd(nctx.frame)
 	switch {
 	case nctx.fresh:
 		// First atom in this node: no junction constraint.
@@ -112,6 +117,16 @@ const (
 	maxBacktrackVector = 256 * 1024 // bit vector size <= max (bits)
 )
 
+// nodeVisitKey uniquely identifies a node-region execution state for the
+// deduplicating prune: instruction, position, the exact bound chain (frame),
+// and the two transient cursor flags.
+type nodeVisitKey struct {
+	pc    uint32
+	pos   int32
+	frame int32
+	fl    uint8
+}
+
 // bitState holds state for the backtracker.
 type bitState struct {
 	end      int
@@ -121,9 +136,12 @@ type bitState struct {
 	visited  []uint32
 
 	// regast node-group extension:
-	am       *astMap // structural map of the input (nil for plain matching)
-	steps    int     // work counter (visited prune is disabled in node regions)
-	maxSteps int     // safety cap on steps
+	am          *astMap                   // structural map of the input (nil for plain matching)
+	frames      []nodeFrame               // per-search arena of node-bound frames
+	frameIntern map[uint64]int32          // canonicalize {end,parent} -> frame index
+	nodeVisited map[nodeVisitKey]struct{} // dedup of node-region states (replaces the bitvector there)
+	steps       int                       // per-start work counter
+	maxSteps    int                       // per-start backstop against adversarial exponential nesting
 
 	inputs inputs
 }
@@ -196,6 +214,20 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 	for i := range b.matchcap {
 		b.matchcap[i] = -1
 	}
+
+	// Node-group state: a pooled, append-only frame arena plus interning and a
+	// node-region visited set. All reused across searches (capacity retained).
+	b.frames = b.frames[:0]
+	if b.frameIntern == nil {
+		b.frameIntern = make(map[uint64]int32)
+	} else {
+		clear(b.frameIntern)
+	}
+	if b.nodeVisited == nil {
+		b.nodeVisited = make(map[nodeVisitKey]struct{})
+	} else {
+		clear(b.nodeVisited)
+	}
 }
 
 // shouldVisit reports whether the combination of (pc, pos) has not
@@ -209,27 +241,60 @@ func (b *bitState) shouldVisit(pc uint32, pos int) bool {
 	return true
 }
 
-// push pushes (pc, pos, arg) onto the job stack if it should be
-// visited. Inside a node-group region (nctx.depth > 0) the (pc,pos) visited
-// prune is bypassed, because the same (pc,pos) can legitimately recur under a
-// different bounding node end; termination there is guaranteed by the fixed AST
-// bounds plus the step cap.
+// shouldVisitNode reports whether a node-region state (pc, pos, exact bound
+// chain, cursor flags) has not been seen yet, recording it if new. Because the
+// frame index encodes the whole nesting chain, this prunes duplicate branches
+// correctly and guarantees termination without a step cap.
+func (b *bitState) shouldVisitNode(pc uint32, pos int, nctx nodeCtx) bool {
+	var fl uint8
+	if nctx.fresh {
+		fl |= 1
+	}
+	if nctx.pendGap {
+		fl |= 2
+	}
+	k := nodeVisitKey{pc: pc, pos: int32(pos), frame: nctx.frame, fl: fl}
+	if _, ok := b.nodeVisited[k]; ok {
+		return false
+	}
+	b.nodeVisited[k] = struct{}{}
+	return true
+}
+
+// push pushes (pc, pos, arg) onto the job stack if it should be visited. Plain
+// (frame < 0) states use the flat (pc,pos) bitvector; node-region states use the
+// frame-keyed node-visited set, which deduplicates them correctly.
 func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) {
-	// Only check shouldVisit when arg is false.
+	// Only check the visited prune when arg is false.
 	// When arg is true, we are continuing a previous visit.
 	if re.prog.Inst[pc].Op == syntax.InstFail {
 		return
 	}
-	if arg || nctx.depth > 0 || b.shouldVisit(pc, pos) {
-		b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos, nctx: nctx})
+	if !arg {
+		if nctx.frame >= 0 {
+			if !b.shouldVisitNode(pc, pos, nctx) {
+				return
+			}
+		} else if !b.shouldVisit(pc, pos) {
+			return
+		}
 	}
+	b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos, nctx: nctx})
 }
 
 // tryBacktrack runs a backtracking search starting at pos.
 func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 	longest := re.longest
 
-	b.push(re, pc, pos, false, nodeCtx{})
+	// Per-start work counter. Frame-keyed dedup makes realistic node patterns
+	// polynomial, so this is only a backstop: deeply-nested same-start
+	// node-groups are inherently exponential (back-to-back ⦃ opens multiply
+	// candidate ends before any consume narrows them), and without a cap such
+	// adversarial patterns would hang. It is reset per start, so it bounds work
+	// per start position rather than across the whole (linear) start sweep.
+	b.steps = 0
+
+	b.push(re, pc, pos, false, noNode())
 	for len(b.jobs) > 0 {
 		l := len(b.jobs) - 1
 		// Pop job off the stack.
@@ -239,9 +304,11 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 		nctx := b.jobs[l].nctx
 		b.jobs = b.jobs[:l]
 
-		b.steps++
-		if b.steps > b.maxSteps {
-			return false
+		if b.maxSteps > 0 {
+			b.steps++
+			if b.steps > b.maxSteps {
+				return false
+			}
 		}
 
 		// Optimization: rather than push and pop,
@@ -253,10 +320,14 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 		// manipulation.
 		goto Skip
 	CheckAndLoop:
-		// Inside a node-group region the (pc,pos) visited prune is unsafe (the
-		// same state can recur under a different bounding node end), so skip it
-		// there; the AST bounds plus the step cap ensure termination.
-		if nctx.depth == 0 && !b.shouldVisit(pc, pos) {
+		// Plain states use the flat (pc,pos) bitvector; node-region states use
+		// the frame-keyed node-visited set. Both deduplicate correctly, so the
+		// search terminates without any step cap.
+		if nctx.frame >= 0 {
+			if !b.shouldVisitNode(pc, pos, nctx) {
+				continue
+			}
+		} else if !b.shouldVisit(pc, pos) {
 			continue
 		}
 	Skip:
@@ -305,7 +376,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 
 		case syntax.InstRune:
 			p := pos
-			if nctx.depth > 0 {
+			if nctx.frame >= 0 {
 				var ok bool
 				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
 					continue
@@ -321,7 +392,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 
 		case syntax.InstRune1:
 			p := pos
-			if nctx.depth > 0 {
+			if nctx.frame >= 0 {
 				var ok bool
 				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
 					continue
@@ -337,7 +408,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 
 		case syntax.InstRuneAnyNotNL:
 			p := pos
-			if nctx.depth > 0 {
+			if nctx.frame >= 0 {
 				var ok bool
 				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
 					continue
@@ -353,7 +424,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 
 		case syntax.InstRuneAny:
 			p := pos
-			if nctx.depth > 0 {
+			if nctx.frame >= 0 {
 				var ok bool
 				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
 					continue
@@ -372,28 +443,29 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 				continue
 			}
 			ends := b.am.endsForStart(pos)
-			// Push candidate node ends ascending so the largest is on top of the
-			// stack and tried first (greedy). The exact-landing check at
-			// InstNodeExit decides which actually fits.
+			// Push one branch per candidate node end (ascending, so the largest
+			// is on top of the stack and tried first — greedy). Each branch gets
+			// a fresh interned frame chained to the current one; the exact-landing
+			// check at InstNodeExit decides which actually fits. Nesting depth is
+			// unbounded: the chain lives in the frame arena, not on the job.
 			for k := 0; k < len(ends); k++ {
-				if nctx.depth >= maxNodeNest {
-					break
-				}
-				b.push(re, inst.Out, pos, false, nctx.pushEnd(int32(ends[k])))
+				nf := b.internFrame(int32(ends[k]), nctx.frame)
+				b.push(re, inst.Out, pos, false, nodeCtx{frame: nf, fresh: true})
 			}
 			continue
 
 		case syntax.InstNodeExit:
-			if nctx.depth == 0 || b.am == nil {
+			if nctx.frame < 0 || b.am == nil {
 				continue
 			}
-			end := int(nctx.top())
+			end := int(b.frames[nctx.frame].end)
 			// The inner pattern must have consumed the node's significant
 			// content: no significant byte may remain before end.
 			if b.am.nextSignificant(pos) < end {
 				continue
 			}
-			nctx = nctx.popEnd()
+			// Restore the parent frame (correct unwind of one nesting level).
+			nctx = nodeCtx{frame: b.frames[nctx.frame].parent}
 			pos = end
 			pc = inst.Out
 			goto CheckAndLoop
@@ -424,7 +496,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 					// significant byte (open forward, close back) so a group
 					// never includes surrounding whitespace/comments.
 					val := pos
-					if nctx.depth > 0 && b.am != nil {
+					if nctx.frame >= 0 && b.am != nil {
 						if inst.Arg&1 == 0 {
 							val = b.am.nextSignificant(pos)
 						} else {
@@ -500,10 +572,13 @@ func (re *Regexp) backtrack(am *astMap, ib []byte, is string, pos int, ncap int,
 	i, end := b.inputs.init(nil, ib, is)
 	b.reset(re.prog, end, ncap)
 	b.am = am
-	b.steps = 0
-	b.maxSteps = 4 * (end + 1) * len(re.prog.Inst)
-	if b.maxSteps < (1 << 20) {
-		b.maxSteps = 1 << 20
+	// The work cap applies only to node-group programs (plain matching is
+	// already bounded by the bitvector visited prune). Generous: realistic node
+	// patterns stay far under it; it only catches adversarial deep nesting.
+	if am != nil {
+		b.maxSteps = 64*(end+1)*len(re.prog.Inst) + (1 << 20)
+	} else {
+		b.maxSteps = 0
 	}
 
 	// Anchored search must start at the beginning of the input

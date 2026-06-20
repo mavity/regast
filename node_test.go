@@ -1,6 +1,9 @@
 package regexp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestNodeGolden is the acceptance wall: each case is an input string, a regast
 // pattern, a replacement template, and the exact expected output. Ported from
@@ -184,8 +187,31 @@ func TestNodeGapWordRule(t *testing.T) {
 	}
 }
 
-// TestNodeSubmatchIndex confirms node-group capture indices map to the raw
-// source with no synthetic-group corruption.
+// TestNodeDeepNesting proves node-group nesting is unbounded (depth 12, far
+// past the old fixed cap of 8). Uses nested parentheses so each level has only
+// one candidate node end — i.e. genuine deep nesting without the (inherent)
+// exponential blow-up of deeply-nested *same-start* node-groups.
+func TestNodeDeepNesting(t *testing.T) {
+	const n = 12
+	expr := strings.Repeat("(", n) + "x" + strings.Repeat(")", n)
+	src := "package p\n\nvar _ = " + expr + "\n"
+
+	// n node-groups deep, each matching one ParenExpr: ⦃\(⦃\(…x…\)⦄\)⦄
+	pat := strings.Repeat(`⦃\(`, n) + "x" + strings.Repeat(`\)⦄`, n)
+
+	re, err := Compile(pat)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		t.Fatalf("no match at nesting depth %d (cap regression?)", n)
+	}
+	if got := src[loc[0]:loc[1]]; got != expr {
+		t.Errorf("match = %q, want %q", got, expr)
+	}
+}
+
 func TestNodeSubmatchIndex(t *testing.T) {
 	src := "package p\n\nvar _ = foo.bar\n"
 	re := MustCompile(`⦃(\w+)\.(\w+)⦄`)
