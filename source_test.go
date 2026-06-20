@@ -1,4 +1,4 @@
-package regexp
+package regast
 
 import "testing"
 

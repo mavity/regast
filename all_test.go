@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package regexp
+package regast
 
 import (
 	"bytes"
@@ -561,7 +561,7 @@ func TestSplitAll(t *testing.T) {
 		if QuoteMeta(test.r) == test.r {
 			strsplit := strings.SplitN(test.s, test.r, test.n)
 			if !slices.Equal(split, strsplit) {
-				t.Errorf("#%d: SplitSeq(%q, %q): regexp vs strings mismatch\nregexp=%q\nstrings=%q", i, test.s, test.r, split, strsplit)
+				t.Errorf("#%d: SplitSeq(%q, %q): regast vs strings mismatch\nregast=%q\nstrings=%q", i, test.s, test.r, split, strsplit)
 			}
 		}
 	}
@@ -1025,7 +1025,7 @@ func TestMinInputLen(t *testing.T) {
 		re, _ := syntax.Parse(tt.Regexp, syntax.Perl)
 		m := minInputLen(re)
 		if m != tt.min {
-			t.Errorf("regexp %#q has minInputLen %d, should be %d", tt.Regexp, m, tt.min)
+			t.Errorf("regast %#q has minInputLen %d, should be %d", tt.Regexp, m, tt.min)
 		}
 	}
 }
@@ -1036,11 +1036,11 @@ func TestUnmarshalText(t *testing.T) {
 		re := compileTest(t, goodRe[i], "")
 		marshaled, err := re.MarshalText()
 		if err != nil {
-			t.Errorf("regexp %#q failed to marshal: %s", re, err)
+			t.Errorf("regast %#q failed to marshal: %s", re, err)
 			continue
 		}
 		if err := unmarshaled.UnmarshalText(marshaled); err != nil {
-			t.Errorf("regexp %#q failed to unmarshal: %s", re, err)
+			t.Errorf("regast %#q failed to unmarshal: %s", re, err)
 			continue
 		}
 		if unmarshaled.String() != goodRe[i] {
@@ -1050,12 +1050,12 @@ func TestUnmarshalText(t *testing.T) {
 		buf := make([]byte, 4, 32)
 		marshalAppend, err := re.AppendText(buf)
 		if err != nil {
-			t.Errorf("regexp %#q failed to marshal: %s", re, err)
+			t.Errorf("regast %#q failed to marshal: %s", re, err)
 			continue
 		}
 		marshalAppend = marshalAppend[4:]
 		if err := unmarshaled.UnmarshalText(marshalAppend); err != nil {
-			t.Errorf("regexp %#q failed to unmarshal: %s", re, err)
+			t.Errorf("regast %#q failed to unmarshal: %s", re, err)
 			continue
 		}
 		if unmarshaled.String() != goodRe[i] {

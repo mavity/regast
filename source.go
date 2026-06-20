@@ -1,7 +1,7 @@
 // Copyright 2026 The regast Authors.
 // Node-aware extension to the vendored Go regexp engine.
 
-package regexp
+package regast
 
 import (
 	"fmt"

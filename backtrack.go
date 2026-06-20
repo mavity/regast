@@ -12,7 +12,7 @@
 // backtrack is a fast replacement for the NFA code on small
 // regexps when onepass cannot be used.
 
-package regexp
+package regast
 
 import (
 	"mohabbat/mohabbat/regast/syntax"

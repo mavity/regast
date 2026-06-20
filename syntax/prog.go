@@ -152,7 +152,7 @@ func (i *Inst) op() InstOp {
 }
 
 // Prefix returns a literal string that all matches for the
-// regexp must start with. Complete is true if the prefix
+// regast must start with. Complete is true if the prefix
 // is the entire match.
 func (p *Prog) Prefix() (prefix string, complete bool) {
 	i := p.skipNop(uint32(p.Start))

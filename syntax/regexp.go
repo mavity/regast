@@ -101,7 +101,7 @@ func (x *Regexp) Equal(y *Regexp) bool {
 	return true
 }
 
-// printFlags is a bit set indicating which flags (including non-capturing parens) to print around a regexp.
+// printFlags is a bit set indicating which flags (including non-capturing parens) to print around a regast.
 type printFlags uint8
 
 const (
@@ -435,7 +435,7 @@ func escape(b *strings.Builder, r rune, force bool) {
 	}
 }
 
-// MaxCap walks the regexp to find the maximum capture index.
+// MaxCap walks the regast to find the maximum capture index.
 func (re *Regexp) MaxCap() int {
 	m := 0
 	if re.Op == OpCapture {
@@ -449,7 +449,7 @@ func (re *Regexp) MaxCap() int {
 	return m
 }
 
-// CapNames walks the regexp to find the names of capturing groups.
+// CapNames walks the regast to find the names of capturing groups.
 func (re *Regexp) CapNames() []string {
 	names := make([]string, re.MaxCap()+1)
 	re.capNames(names)

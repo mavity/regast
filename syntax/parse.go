@@ -20,7 +20,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	return "error parsing regexp: " + e.Code.String() + ": `" + e.Expr + "`"
+	return "error parsing regast: " + e.Code.String() + ": `" + e.Expr + "`"
 }
 
 // An ErrorCode describes a failure to parse a regular expression.
@@ -28,7 +28,7 @@ type ErrorCode string
 
 const (
 	// Unexpected error
-	ErrInternalError ErrorCode = "regexp/syntax: internal error"
+	ErrInternalError ErrorCode = "regast/syntax: internal error"
 
 	// Parse errors
 	ErrInvalidCharClass      ErrorCode = "invalid character class"
@@ -52,7 +52,7 @@ func (e ErrorCode) String() string {
 	return string(e)
 }
 
-// Flags control the behavior of the parser and record information about regexp context.
+// Flags control the behavior of the parser and record information about regast context.
 type Flags uint16
 
 const (
@@ -64,8 +64,8 @@ const (
 	NonGreedy                       // make repetition operators default to non-greedy
 	PerlX                           // allow Perl extensions
 	UnicodeGroups                   // allow \p{Han}, \P{Han} for Unicode group and negation
-	WasDollar                       // regexp OpEndText was $, not \z
-	Simple                          // regexp contains no counted repetition
+	WasDollar                       // regast OpEndText was $, not \z
+	Simple                          // regast contains no counted repetition
 
 	MatchNL = ClassNL | DotNL
 
@@ -95,7 +95,7 @@ func isPatternSpaceByte(b byte) bool {
 	return false
 }
 
-// maxHeight is the maximum height of a regexp parse tree.
+// maxHeight is the maximum height of a regast parse tree.
 // It is somewhat arbitrarily chosen, but the idea is to be large enough
 // that no one will actually hit in real use but at the same time small enough
 // that recursion on the Regexp tree will not hit the 1GB Go stack limit.
@@ -109,18 +109,18 @@ func isPatternSpaceByte(b byte) bool {
 // until we've allocated at least maxHeight Regexp structures.
 const maxHeight = 1000
 
-// maxSize is the maximum size of a compiled regexp in Insts.
+// maxSize is the maximum size of a compiled regast in Insts.
 // It too is somewhat arbitrarily chosen, but the idea is to be large enough
 // to allow significant regexps while at the same time small enough that
 // the compiled form will not take up too much memory.
 // 128 MB is enough for a 3.3 million Inst structures, which roughly
-// corresponds to a 3.3 MB regexp.
+// corresponds to a 3.3 MB regast.
 const (
 	maxSize  = 128 << 20 / instSize
 	instSize = 5 * 8 // byte, 2 uint32, slice is 5 64-bit words
 )
 
-// maxRunes is the maximum number of runes allowed in a regexp tree
+// maxRunes is the maximum number of runes allowed in a regast tree
 // counting the runes in all the nodes.
 // Ignoring character classes p.numRunes is always less than the length of the regexp.
 // Character classes can make it much larger: each \pL adds 1292 runes.
@@ -151,8 +151,8 @@ type parser struct {
 	numRegexp   int               // number of regexps allocated
 	numRunes    int               // number of runes in char classes
 	repeats     int64             // product of all repetitions seen
-	height      map[*Regexp]int   // regexp height, for height limit check
-	size        map[*Regexp]int64 // regexp compiled size, for size limit check
+	height      map[*Regexp]int   // regast height, for height limit check
+	size        map[*Regexp]int64 // regast compiled size, for size limit check
 }
 
 func (p *parser) newRegexp(op Op) *Regexp {
@@ -383,7 +383,7 @@ func (p *parser) maybeConcat(r rune, flags Flags) bool {
 	return false // did not push r
 }
 
-// literal pushes a literal regexp for the rune r on the stack.
+// literal pushes a literal regast for the rune r on the stack.
 func (p *parser) literal(r rune) {
 	re := p.newRegexp(OpLiteral)
 	re.Flags = p.flags
@@ -408,8 +408,8 @@ func minFoldRune(r rune) rune {
 	return m
 }
 
-// op pushes a regexp with the given op onto the stack
-// and returns that regexp.
+// op pushes a regast with the given op onto the stack
+// and returns that regast.
 func (p *parser) op(op Op) *Regexp {
 	re := p.newRegexp(op)
 	re.Flags = p.flags

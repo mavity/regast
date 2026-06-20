@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package regexp implements regular expression search.
+// Package regast implements regular expression search.
 //
 // The syntax of the regular expressions accepted is the same
 // general syntax used by Perl, Python, and other languages.
 // More precisely, it is the syntax accepted by RE2 and described at
 // https://golang.org/s/re2syntax, except for \C.
-// For an overview of the syntax, see the [regexp/syntax] package.
+// For an overview of the syntax, see the [regast/syntax] package.
 //
-// The regexp implementation provided by this package is
+// The regast implementation provided by this package is
 // guaranteed to run in time linear in the size of the input.
 // (This is a property not guaranteed by most open source
 // implementations of regular expressions.) For more information
@@ -58,7 +58,7 @@
 // before returning.
 //
 // (There are a few other methods that do not match this pattern.)
-package regexp
+package regast
 
 import (
 	"bytes"
@@ -89,13 +89,13 @@ type Regexp struct {
 	prefixEnd      uint32         // pc for last rune in prefix
 	mpool          int            // pool for machines
 	matchcap       int            // size of recorded match lengths
-	prefixComplete bool           // prefix is the entire regexp
+	prefixComplete bool           // prefix is the entire regast
 	cond           syntax.EmptyOp // empty-width conditions required at start of match
 	minInputLen    int            // minimum length of the input in bytes
 
 	// This field can be modified by the Longest method,
 	// but it is otherwise read-only.
-	longest bool // whether regexp prefers leftmost-longest match
+	longest bool // whether regast prefers leftmost-longest match
 }
 
 // String returns the source text used to compile the regular expression.
@@ -119,7 +119,7 @@ func (re *Regexp) Copy() *Regexp {
 // Compile parses a regular expression and returns, if successful,
 // a [Regexp] object that can be used to match against text.
 //
-// When matching against text, the regexp returns a match that
+// When matching against text, the regast returns a match that
 // begins as early as possible in the input (leftmost), and among those
 // it chooses the one that a backtracking search would have found first.
 // This so-called leftmost-first matching is the same semantics
@@ -134,7 +134,7 @@ func Compile(expr string) (*Regexp, error) {
 // to POSIX ERE (egrep) syntax and changes the match semantics to
 // leftmost-longest.
 //
-// That is, when matching against text, the regexp returns a match that
+// That is, when matching against text, the regast returns a match that
 // begins as early as possible in the input (leftmost), and among those
 // it chooses a match that is as long as possible.
 // This so-called leftmost-longest matching is the same semantics
@@ -154,7 +154,7 @@ func CompilePOSIX(expr string) (*Regexp, error) {
 }
 
 // Longest makes future searches prefer the leftmost-longest match.
-// That is, when matching against text, the regexp returns a match that
+// That is, when matching against text, the regast returns a match that
 // begins as early as possible in the input (leftmost), and among those
 // it chooses a match that is as long as possible.
 // This method modifies the [Regexp] and may not be called concurrently
@@ -314,7 +314,7 @@ func minInputLen(re *syntax.Regexp) int {
 func MustCompile(str string) *Regexp {
 	regexp, err := Compile(str)
 	if err != nil {
-		panic(`regexp: Compile(` + quote(str) + `): ` + err.Error())
+		panic(`regast: Compile(` + quote(str) + `): ` + err.Error())
 	}
 	return regexp
 }
@@ -325,7 +325,7 @@ func MustCompile(str string) *Regexp {
 func MustCompilePOSIX(str string) *Regexp {
 	regexp, err := CompilePOSIX(str)
 	if err != nil {
-		panic(`regexp: CompilePOSIX(` + quote(str) + `): ` + err.Error())
+		panic(`regast: CompilePOSIX(` + quote(str) + `): ` + err.Error())
 	}
 	return regexp
 }
@@ -1321,7 +1321,7 @@ func (re *Regexp) SplitSeq(s string) iter.Seq[string] {
 //
 // Example:
 //
-//	s := regexp.MustCompile("a*").Split("abaabaccadaaae", 5)
+//	s := regast.MustCompile("a*").Split("abaabaccadaaae", 5)
 //	// s: ["", "b", "b", "c", "cadaaae"]
 //
 // The count determines the number of substrings to return:

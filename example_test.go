@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package regexp_test
+package regast_test
 
 import (
 	"fmt"
-	"regexp"
+	"mohabbat/mohabbat/regast"
 	"strings"
 )
 
 func Example() {
 	// Compile the expression once, usually at init time.
 	// Use raw strings to avoid having to quote the backslashes.
-	var validID = regexp.MustCompile(`^[a-z]+\[[0-9]+\]$`)
+	var validID = regast.MustCompile(`^[a-z]+\[[0-9]+\]$`)
 
 	fmt.Println(validID.MatchString("adam[23]"))
 	fmt.Println(validID.MatchString("eve[7]"))
@@ -27,40 +27,40 @@ func Example() {
 }
 
 func ExampleMatch() {
-	matched, err := regexp.Match(`foo.*`, []byte(`seafood`))
+	matched, err := regast.Match(`foo.*`, []byte(`seafood`))
 	fmt.Println(matched, err)
-	matched, err = regexp.Match(`bar.*`, []byte(`seafood`))
+	matched, err = regast.Match(`bar.*`, []byte(`seafood`))
 	fmt.Println(matched, err)
-	matched, err = regexp.Match(`a(b`, []byte(`seafood`))
+	matched, err = regast.Match(`a(b`, []byte(`seafood`))
 	fmt.Println(matched, err)
 
 	// Output:
 	// true <nil>
 	// false <nil>
-	// false error parsing regexp: missing closing ): `a(b`
+	// false error parsing regast: missing closing ): `a(b`
 }
 
 func ExampleMatchString() {
-	matched, err := regexp.MatchString(`foo.*`, "seafood")
+	matched, err := regast.MatchString(`foo.*`, "seafood")
 	fmt.Println(matched, err)
-	matched, err = regexp.MatchString(`bar.*`, "seafood")
+	matched, err = regast.MatchString(`bar.*`, "seafood")
 	fmt.Println(matched, err)
-	matched, err = regexp.MatchString(`a(b`, "seafood")
+	matched, err = regast.MatchString(`a(b`, "seafood")
 	fmt.Println(matched, err)
 	// Output:
 	// true <nil>
 	// false <nil>
-	// false error parsing regexp: missing closing ): `a(b`
+	// false error parsing regast: missing closing ): `a(b`
 }
 
 func ExampleQuoteMeta() {
-	fmt.Println(regexp.QuoteMeta(`Escaping symbols like: .+*?()|[]{}^$`))
+	fmt.Println(regast.QuoteMeta(`Escaping symbols like: .+*?()|[]{}^$`))
 	// Output:
 	// Escaping symbols like: \.\+\*\?\(\)\|\[\]\{\}\^\$
 }
 
 func ExampleRegexp_Find() {
-	re := regexp.MustCompile(`foo.?`)
+	re := regast.MustCompile(`foo.?`)
 	fmt.Printf("%q\n", re.Find([]byte(`seafood fool`)))
 
 	// Output:
@@ -68,7 +68,7 @@ func ExampleRegexp_Find() {
 }
 
 func ExampleRegexp_FindAll() {
-	re := regexp.MustCompile(`foo.?`)
+	re := regast.MustCompile(`foo.?`)
 	fmt.Printf("%q\n", re.FindAll([]byte(`seafood fool`), -1))
 
 	// Output:
@@ -76,7 +76,7 @@ func ExampleRegexp_FindAll() {
 }
 
 func ExampleRegexp_FindAllSubmatch() {
-	re := regexp.MustCompile(`foo(.?)`)
+	re := regast.MustCompile(`foo(.?)`)
 	fmt.Printf("%q\n", re.FindAllSubmatch([]byte(`seafood fool`), -1))
 
 	// Output:
@@ -84,7 +84,7 @@ func ExampleRegexp_FindAllSubmatch() {
 }
 
 func ExampleRegexp_FindSubmatch() {
-	re := regexp.MustCompile(`foo(.?)`)
+	re := regast.MustCompile(`foo(.?)`)
 	fmt.Printf("%q\n", re.FindSubmatch([]byte(`seafood fool`)))
 
 	// Output:
@@ -92,7 +92,7 @@ func ExampleRegexp_FindSubmatch() {
 }
 
 func ExampleRegexp_Match() {
-	re := regexp.MustCompile(`foo.?`)
+	re := regast.MustCompile(`foo.?`)
 	fmt.Println(re.Match([]byte(`seafood fool`)))
 	fmt.Println(re.Match([]byte(`something else`)))
 
@@ -102,7 +102,7 @@ func ExampleRegexp_Match() {
 }
 
 func ExampleRegexp_FindString() {
-	re := regexp.MustCompile(`foo.?`)
+	re := regast.MustCompile(`foo.?`)
 	fmt.Printf("%q\n", re.FindString("seafood fool"))
 	fmt.Printf("%q\n", re.FindString("meat"))
 	// Output:
@@ -111,7 +111,7 @@ func ExampleRegexp_FindString() {
 }
 
 func ExampleRegexp_FindStringIndex() {
-	re := regexp.MustCompile(`ab?`)
+	re := regast.MustCompile(`ab?`)
 	fmt.Println(re.FindStringIndex("tablett"))
 	fmt.Println(re.FindStringIndex("foo") == nil)
 	// Output:
@@ -120,7 +120,7 @@ func ExampleRegexp_FindStringIndex() {
 }
 
 func ExampleRegexp_FindStringSubmatch() {
-	re := regexp.MustCompile(`a(x*)b(y|z)c`)
+	re := regast.MustCompile(`a(x*)b(y|z)c`)
 	fmt.Printf("%q\n", re.FindStringSubmatch("-axxxbyc-"))
 	fmt.Printf("%q\n", re.FindStringSubmatch("-abzc-"))
 	// Output:
@@ -129,7 +129,7 @@ func ExampleRegexp_FindStringSubmatch() {
 }
 
 func ExampleRegexp_FindAllString() {
-	re := regexp.MustCompile(`a.`)
+	re := regast.MustCompile(`a.`)
 	fmt.Println(re.FindAllString("paranormal", -1))
 	fmt.Println(re.FindAllString("paranormal", 2))
 	fmt.Println(re.FindAllString("graal", -1))
@@ -142,7 +142,7 @@ func ExampleRegexp_FindAllString() {
 }
 
 func ExampleRegexp_FindAllStringSubmatch() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	fmt.Printf("%q\n", re.FindAllStringSubmatch("-ab-", -1))
 	fmt.Printf("%q\n", re.FindAllStringSubmatch("-axxb-", -1))
 	fmt.Printf("%q\n", re.FindAllStringSubmatch("-ab-axb-", -1))
@@ -155,7 +155,7 @@ func ExampleRegexp_FindAllStringSubmatch() {
 }
 
 func ExampleRegexp_FindAllStringSubmatchIndex() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	// Indices:
 	//    01234567   012345678
 	//    -ab-axb-   -axxb-ab-
@@ -173,7 +173,7 @@ func ExampleRegexp_FindAllStringSubmatchIndex() {
 }
 
 func ExampleRegexp_FindSubmatchIndex() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	// Indices:
 	//    01234567   012345678
 	//    -ab-axb-   -axxb-ab-
@@ -191,7 +191,7 @@ func ExampleRegexp_FindSubmatchIndex() {
 }
 
 func ExampleRegexp_Longest() {
-	re := regexp.MustCompile(`a(|b)`)
+	re := regast.MustCompile(`a(|b)`)
 	fmt.Println(re.FindString("ab"))
 	re.Longest()
 	fmt.Println(re.FindString("ab"))
@@ -201,7 +201,7 @@ func ExampleRegexp_Longest() {
 }
 
 func ExampleRegexp_MatchString() {
-	re := regexp.MustCompile(`(gopher){2}`)
+	re := regast.MustCompile(`(gopher){2}`)
 	fmt.Println(re.MatchString("gopher"))
 	fmt.Println(re.MatchString("gophergopher"))
 	fmt.Println(re.MatchString("gophergophergopher"))
@@ -212,10 +212,10 @@ func ExampleRegexp_MatchString() {
 }
 
 func ExampleRegexp_NumSubexp() {
-	re0 := regexp.MustCompile(`a.`)
+	re0 := regast.MustCompile(`a.`)
 	fmt.Printf("%d\n", re0.NumSubexp())
 
-	re := regexp.MustCompile(`(.*)((a)b)(.*)a`)
+	re := regast.MustCompile(`(.*)((a)b)(.*)a`)
 	fmt.Println(re.NumSubexp())
 	// Output:
 	// 0
@@ -223,13 +223,13 @@ func ExampleRegexp_NumSubexp() {
 }
 
 func ExampleRegexp_ReplaceAll() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	fmt.Printf("%s\n", re.ReplaceAll([]byte("-ab-axxb-"), []byte("T")))
 	fmt.Printf("%s\n", re.ReplaceAll([]byte("-ab-axxb-"), []byte("$1")))
 	fmt.Printf("%s\n", re.ReplaceAll([]byte("-ab-axxb-"), []byte("$1W")))
 	fmt.Printf("%s\n", re.ReplaceAll([]byte("-ab-axxb-"), []byte("${1}W")))
 
-	re2 := regexp.MustCompile(`a(?P<1W>x*)b`)
+	re2 := regast.MustCompile(`a(?P<1W>x*)b`)
 	fmt.Printf("%s\n", re2.ReplaceAll([]byte("-ab-axxb-"), []byte("$1W")))
 	fmt.Printf("%s\n", re2.ReplaceAll([]byte("-ab-axxb-"), []byte("${1}W")))
 
@@ -243,7 +243,7 @@ func ExampleRegexp_ReplaceAll() {
 }
 
 func ExampleRegexp_ReplaceAllLiteralString() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	fmt.Println(re.ReplaceAllLiteralString("-ab-axxb-", "T"))
 	fmt.Println(re.ReplaceAllLiteralString("-ab-axxb-", "$1"))
 	fmt.Println(re.ReplaceAllLiteralString("-ab-axxb-", "${1}"))
@@ -254,13 +254,13 @@ func ExampleRegexp_ReplaceAllLiteralString() {
 }
 
 func ExampleRegexp_ReplaceAllString() {
-	re := regexp.MustCompile(`a(x*)b`)
+	re := regast.MustCompile(`a(x*)b`)
 	fmt.Println(re.ReplaceAllString("-ab-axxb-", "T"))
 	fmt.Println(re.ReplaceAllString("-ab-axxb-", "$1"))
 	fmt.Println(re.ReplaceAllString("-ab-axxb-", "$1W"))
 	fmt.Println(re.ReplaceAllString("-ab-axxb-", "${1}W"))
 
-	re2 := regexp.MustCompile(`a(?P<1W>x*)b`)
+	re2 := regast.MustCompile(`a(?P<1W>x*)b`)
 	fmt.Printf("%s\n", re2.ReplaceAllString("-ab-axxb-", "$1W"))
 	fmt.Println(re.ReplaceAllString("-ab-axxb-", "${1}W"))
 
@@ -274,14 +274,14 @@ func ExampleRegexp_ReplaceAllString() {
 }
 
 func ExampleRegexp_ReplaceAllStringFunc() {
-	re := regexp.MustCompile(`[^aeiou]`)
+	re := regast.MustCompile(`[^aeiou]`)
 	fmt.Println(re.ReplaceAllStringFunc("seafood fool", strings.ToUpper))
 	// Output:
 	// SeaFooD FooL
 }
 
 func ExampleRegexp_SubexpNames() {
-	re := regexp.MustCompile(`(?P<first>[a-zA-Z]+) (?P<last>[a-zA-Z]+)`)
+	re := regast.MustCompile(`(?P<first>[a-zA-Z]+) (?P<last>[a-zA-Z]+)`)
 	fmt.Println(re.MatchString("Alan Turing"))
 	fmt.Printf("%q\n", re.SubexpNames())
 	reversed := fmt.Sprintf("${%s} ${%s}", re.SubexpNames()[2], re.SubexpNames()[1])
@@ -295,7 +295,7 @@ func ExampleRegexp_SubexpNames() {
 }
 
 func ExampleRegexp_SubexpIndex() {
-	re := regexp.MustCompile(`(?P<first>[a-zA-Z]+) (?P<last>[a-zA-Z]+)`)
+	re := regast.MustCompile(`(?P<first>[a-zA-Z]+) (?P<last>[a-zA-Z]+)`)
 	fmt.Println(re.MatchString("Alan Turing"))
 	matches := re.FindStringSubmatch("Alan Turing")
 	lastIndex := re.SubexpIndex("last")
@@ -308,12 +308,12 @@ func ExampleRegexp_SubexpIndex() {
 }
 
 func ExampleRegexp_Split() {
-	a := regexp.MustCompile(`a`)
+	a := regast.MustCompile(`a`)
 	fmt.Println(a.Split("banana", -1))
 	fmt.Println(a.Split("banana", 0))
 	fmt.Println(a.Split("banana", 1))
 	fmt.Println(a.Split("banana", 2))
-	zp := regexp.MustCompile(`z+`)
+	zp := regast.MustCompile(`z+`)
 	fmt.Println(zp.Split("pizza", -1))
 	fmt.Println(zp.Split("pizza", 0))
 	fmt.Println(zp.Split("pizza", 1))
@@ -340,7 +340,7 @@ func ExampleRegexp_Expand() {
 `)
 
 	// Regex pattern captures "key: value" pair from the content.
-	pattern := regexp.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
+	pattern := regast.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
 
 	// Template to convert "key: value" to "key=value" by
 	// referencing the values captured by the regex pattern.
@@ -372,7 +372,7 @@ func ExampleRegexp_ExpandString() {
 `
 
 	// Regex pattern captures "key: value" pair from the content.
-	pattern := regexp.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
+	pattern := regast.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
 
 	// Template to convert "key: value" to "key=value" by
 	// referencing the values captured by the regex pattern.
@@ -400,7 +400,7 @@ func ExampleRegexp_FindIndex() {
 	option2: value2
 `)
 	// Regex pattern captures "key: value" pair from the content.
-	pattern := regexp.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
+	pattern := regast.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
 
 	loc := pattern.FindIndex(content)
 	fmt.Println(loc)
@@ -417,7 +417,7 @@ func ExampleRegexp_FindAllSubmatchIndex() {
 	option2: value2
 `)
 	// Regex pattern captures "key: value" pair from the content.
-	pattern := regexp.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
+	pattern := regast.MustCompile(`(?m)(?P<key>\w+):\s+(?P<value>\w+)$`)
 	allIndexes := pattern.FindAllSubmatchIndex(content, -1)
 	for _, loc := range allIndexes {
 		fmt.Println(loc)
@@ -438,7 +438,7 @@ func ExampleRegexp_FindAllSubmatchIndex() {
 
 func ExampleRegexp_FindAllIndex() {
 	content := []byte("London")
-	re := regexp.MustCompile(`o.`)
+	re := regast.MustCompile(`o.`)
 	fmt.Println(re.FindAllIndex(content, 1))
 	fmt.Println(re.FindAllIndex(content, -1))
 	// Output:

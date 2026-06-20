@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package regexp
+package regast
 
 import (
 	"mohabbat/mohabbat/regast/syntax"
@@ -12,8 +12,8 @@ import (
 	"unicode/utf8"
 )
 
-// "One-pass" regexp execution.
-// Some regexps can be analyzed to determine that they never need
+// "One-pass" regast execution.
+// Some regasts can be analyzed to determine that they never need
 // backtracking: they are guaranteed to run in one pass over the string
 // without bothering to save all the usual NFA state.
 // Detect those and execute them more quickly.
@@ -34,7 +34,7 @@ type onePassInst struct {
 }
 
 // onePassPrefix returns a literal string that all matches for the
-// regexp must start with. Complete is true if the prefix
+// regast must start with. Complete is true if the prefix
 // is the entire match. Pc is the index of the last rune instruction
 // in the string. The onePassPrefix skips over the mandatory
 // EmptyBeginText.
@@ -453,14 +453,14 @@ func makeOnePass(p *onePassProg) *onePassProg {
 }
 
 // compileOnePass returns a new *syntax.Prog suitable for onePass execution if the original Prog
-// can be recharacterized as a one-pass regexp program, or syntax.nil if the
+// can be recharacterized as a one-pass regast program, or syntax.nil if the
 // Prog cannot be converted. For a one pass prog, the fundamental condition that must
 // be true is: at any InstAlt, there must be no ambiguity about what branch to  take.
 func compileOnePass(prog *syntax.Prog) (p *onePassProg) {
 	if prog.Start == 0 {
 		return nil
 	}
-	// onepass regexp is anchored
+	// onepass regast is anchored
 	if prog.Inst[prog.Start].Op != syntax.InstEmptyWidth ||
 		syntax.EmptyOp(prog.Inst[prog.Start].Arg)&syntax.EmptyBeginText != syntax.EmptyBeginText {
 		return nil

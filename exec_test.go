@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package regexp
+package regast
 
 import (
 	"bufio"
@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-// TestRE2 tests this package's regexp API against test cases
+// TestRE2 tests this package's regast API against test cases
 // considered during RE2's exhaustive tests, which run all possible
 // regexps over a given set of atoms and operators, up to a given
 // complexity, over all possible strings over a given alphabet,
@@ -43,16 +43,16 @@ import (
 //
 // The stanza begins by defining a set of strings, quoted
 // using Go double-quote syntax, one per line. Then the
-// regexps section gives a sequence of regexps to run on
-// the strings. In the block that follows a regexp, each line
+// regasts section gives a sequence of regasts to run on
+// the strings. In the block that follows a regast, each line
 // gives the semicolon-separated match results of running
-// the regexp on the corresponding string.
+// the regast on the corresponding string.
 // Each match result is either a single -, meaning no match, or a
 // space-separated sequence of pairs giving the match and
 // submatch indices. An unmatched subexpression formats
 // its pair as a single - (not illustrated above).  For now
-// each regexp run produces two match results, one for a
-// “full match” that restricts the regexp to matching the entire
+// each regast run produces two match results, one for a
+// “full match” that restricts the regast to matching the entire
 // string or nothing, and one for a “partial match” that gives
 // the leftmost first match found in the string.
 //
@@ -123,7 +123,7 @@ func testRE2(t *testing.T, file string) {
 			}
 			re, err = tryCompile(q)
 			if err != nil {
-				if err.Error() == "error parsing regexp: invalid escape sequence: `\\C`" {
+				if err.Error() == "error parsing regast: invalid escape sequence: `\\C`" {
 					// We don't and likely never will support \C; keep going.
 					continue
 				}

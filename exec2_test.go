@@ -4,7 +4,7 @@
 
 //go:build !race
 
-package regexp
+package regast
 
 import (
 	"testing"

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package regexp
+package regast
 
 import (
 	"io"
@@ -509,7 +509,7 @@ Return:
 	return dstCap
 }
 
-// doMatch reports whether either r, b or s match the regexp.
+// doMatch reports whether either r, b or s match the regast.
 func (re *Regexp) doMatch(r io.RuneReader, b []byte, s string) bool {
 	return re.find(re.astMapFor(b, s), r, b, s, 0, 0, nil) != nil
 }

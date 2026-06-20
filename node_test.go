@@ -1,4 +1,4 @@
-﻿package regexp
+﻿package regast
 
 import (
 	"testing"
@@ -12,7 +12,7 @@ func TestNodeGolden(t *testing.T) {
 		repl string
 		want string
 	}{
-		// --- Plain regex: identical to upstream regexp ---
+		// --- Plain regex: identical to upstream regast ---
 		{"plain literal replace", "package p\n\nvar x = 1\n", `x = 1`, `y = 2`, "package p\n\nvar y = 2\n"},
 		{"plain regex group swap", "package p\n\nvar _ = \"a-b\"\n", `(\w)-(\w)`, `$2-$1`, "package p\n\nvar _ = \"b-a\"\n"},
 
