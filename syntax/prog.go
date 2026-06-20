@@ -352,5 +352,11 @@ func dumpInst(b *strings.Builder, i *Inst) {
 		bw(b, "any -> ", u32(i.Out))
 	case InstRuneAnyNotNL:
 		bw(b, "anynotnl -> ", u32(i.Out))
+	case InstNodeGroup:
+		bw(b, "nodegroup -> ", u32(i.Out))
+	case InstNodeExit:
+		bw(b, "nodeexit -> ", u32(i.Out))
+	case InstGap:
+		bw(b, "gap -> ", u32(i.Out))
 	}
 }

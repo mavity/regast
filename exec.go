@@ -511,17 +511,27 @@ Return:
 
 // doMatch reports whether either r, b or s match the regexp.
 func (re *Regexp) doMatch(r io.RuneReader, b []byte, s string) bool {
-	return re.find(r, b, s, 0, 0, nil) != nil
+	return re.find(re.astMapFor(b, s), r, b, s, 0, 0, nil) != nil
 }
 
 // find finds the leftmost match in the input, appends the position
 // of its subexpressions to dstCap and returns dstCap.
 //
 // nil is returned if no matches are found and non-nil if matches are found.
-func (re *Regexp) find(r io.RuneReader, b []byte, s string, pos int, ncap int, dstCap []int) []int {
+func (re *Regexp) find(am *astMap, r io.RuneReader, b []byte, s string, pos int, ncap int, dstCap []int) []int {
 	if dstCap == nil {
 		// Make sure 'return dstCap' is non-nil.
 		dstCap = arrayNoInts[:0:0]
+	}
+
+	if re.prog.HasNodeGroup {
+		// Node-group programs need a full buffer and the AST map; streams are
+		// unsupported. They always run on the (extended) bitstate backtracker,
+		// regardless of the usual size cap.
+		if r != nil || am == nil {
+			return nil
+		}
+		return re.backtrack(am, b, s, pos, ncap, dstCap)
 	}
 
 	if r == nil && len(b)+len(s) < re.minInputLen {
@@ -532,7 +542,7 @@ func (re *Regexp) find(r io.RuneReader, b []byte, s string, pos int, ncap int, d
 		return re.doOnePass(r, b, s, pos, ncap, dstCap)
 	}
 	if r == nil && len(b)+len(s) < re.maxBitStateLen {
-		return re.backtrack(b, s, pos, ncap, dstCap)
+		return re.backtrack(nil, b, s, pos, ncap, dstCap)
 	}
 
 	m := re.get()

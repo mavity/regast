@@ -154,6 +154,10 @@ func (c *compiler) compile(re *Regexp) frag {
 			f = c.alt(f, c.compile(sub))
 		}
 		return f
+	case OpNodeGroup:
+		return c.nodeGroup(c.compile(re.Sub[0]))
+	case OpGap:
+		return c.gap()
 	}
 	panic("regexp: unhandled case in compile")
 }
@@ -169,6 +173,30 @@ func (c *compiler) nop() frag {
 	f := c.inst(InstNop)
 	f.out = makePatchList(f.i << 1)
 	return f
+}
+
+// gap emits an InstGap (regast structural delimiter).
+func (c *compiler) gap() frag {
+	f := c.inst(InstGap)
+	f.out = makePatchList(f.i << 1)
+	return f
+}
+
+// nodeGroup emits InstNodeGroup ... InstNodeExit around the inner fragment.
+// The InstNodeGroup's Out enters the inner pattern; the inner pattern's exits
+// are patched to the InstNodeExit; the InstNodeExit's Out is the continuation.
+func (c *compiler) nodeGroup(inner frag) frag {
+	c.p.HasNodeGroup = true
+	ng := c.inst(InstNodeGroup)
+	exit := c.inst(InstNodeExit)
+	if inner.i == 0 {
+		c.p.Inst[ng.i].Out = exit.i
+	} else {
+		c.p.Inst[ng.i].Out = inner.i
+		inner.out.patch(c.p, exit.i)
+	}
+	exit.out = makePatchList(exit.i << 1)
+	return frag{i: ng.i, out: exit.out, nullable: false}
 }
 
 func (c *compiler) fail() frag {

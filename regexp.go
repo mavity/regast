@@ -183,13 +183,18 @@ func compile(expr string, mode syntax.Flags, longest bool) (*Regexp, error) {
 	regexp := &Regexp{
 		expr:        expr,
 		prog:        prog,
-		onepass:     compileOnePass(prog),
+		onepass:     nil,
 		numSubexp:   maxCap,
 		subexpNames: capNames,
 		cond:        prog.StartCond(),
 		longest:     longest,
 		matchcap:    matchcap,
 		minInputLen: minInputLen(re),
+	}
+	// Node-group programs contain instructions the one-pass engine does not
+	// understand; they always run on the bitstate backtracker.
+	if !prog.HasNodeGroup {
+		regexp.onepass = compileOnePass(prog)
 	}
 	if regexp.onepass == nil {
 		regexp.prefix, regexp.prefixComplete = prog.Prefix()
@@ -584,6 +589,7 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 	searchPos := 0    // position where we next look for a match
 	var buf []byte
 	var endPos int
+	am := re.astMapFor(bsrc, src)
 	if bsrc != nil {
 		endPos = len(bsrc)
 	} else {
@@ -595,7 +601,7 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 
 	var dstCap [2]int
 	for searchPos <= endPos {
-		a := re.find(nil, bsrc, src, searchPos, nmatch, dstCap[:0])
+		a := re.find(am, nil, bsrc, src, searchPos, nmatch, dstCap[:0])
 		if len(a) == 0 {
 			break // no more matches
 		}
@@ -749,6 +755,7 @@ func (re *Regexp) matches(s string, b []byte, max, ncap int) iter.Seq[[]int] {
 		if max == 0 {
 			return
 		}
+		am := re.astMapFor(b, s)
 		var end int
 		if b == nil {
 			end = len(s)
@@ -757,7 +764,7 @@ func (re *Regexp) matches(s string, b []byte, max, ncap int) iter.Seq[[]int] {
 		}
 		var matches []int
 		for pos, prevMatchEnd := 0, -1; pos <= end; {
-			matches = re.find(nil, b, s, pos, ncap, matches[:0])
+			matches = re.find(am, nil, b, s, pos, ncap, matches[:0])
 			if len(matches) == 0 {
 				break
 			}
@@ -806,7 +813,7 @@ func (re *Regexp) matches(s string, b []byte, max, ncap int) iter.Seq[[]int] {
 // The return value is nil for no match.
 func (re *Regexp) Find(b []byte) []byte {
 	var dstCap [2]int
-	a := re.find(nil, b, "", 0, 2, dstCap[:0])
+	a := re.find(re.astMapFor(b, ""), nil, b, "", 0, 2, dstCap[:0])
 	if a == nil {
 		return nil
 	}
@@ -818,7 +825,7 @@ func (re *Regexp) Find(b []byte) []byte {
 // To distinguish those two cases, use [Regexp.FindStringIndex] or [Regexp.FindStringSubmatch].
 func (re *Regexp) FindString(s string) string {
 	var dstCap [2]int
-	a := re.find(nil, nil, s, 0, 2, dstCap[:0])
+	a := re.find(re.astMapFor(nil, s), nil, nil, s, 0, 2, dstCap[:0])
 	if a == nil {
 		return ""
 	}
@@ -829,7 +836,7 @@ func (re *Regexp) FindString(s string) string {
 // The match itself is at b[m[0]:m[1]].
 // The return value is nil for no match.
 func (re *Regexp) FindIndex(b []byte) (m []int) {
-	m = re.find(nil, b, "", 0, 2, nil)
+	m = re.find(re.astMapFor(b, ""), nil, b, "", 0, 2, nil)
 	if m == nil {
 		return nil
 	}
@@ -840,7 +847,7 @@ func (re *Regexp) FindIndex(b []byte) (m []int) {
 // The match itself is at s[m[0]:m[1]].
 // The return value is nil for no match.
 func (re *Regexp) FindStringIndex(s string) (m []int) {
-	m = re.find(nil, nil, s, 0, 2, nil)
+	m = re.find(re.astMapFor(nil, s), nil, nil, s, 0, 2, nil)
 	if m == nil {
 		return nil
 	}
@@ -854,7 +861,7 @@ func (re *Regexp) FindStringIndex(s string) (m []int) {
 // FindReaderIndex may read arbitrarily far from r,
 // including reading beyond the returned match.
 func (re *Regexp) FindReaderIndex(r io.RuneReader) (m []int) {
-	m = re.find(r, nil, "", 0, 2, nil)
+	m = re.find(nil, r, nil, "", 0, 2, nil)
 	if m == nil {
 		return nil
 	}
@@ -866,7 +873,7 @@ func (re *Regexp) FindReaderIndex(r io.RuneReader) (m []int) {
 // The return value is nil for no match.
 func (re *Regexp) FindSubmatch(b []byte) [][]byte {
 	var dstCap [4]int
-	m := re.find(nil, b, "", 0, re.prog.NumCap, dstCap[:0])
+	m := re.find(re.astMapFor(b, ""), nil, b, "", 0, re.prog.NumCap, dstCap[:0])
 	if m == nil {
 		return nil
 	}
@@ -884,7 +891,7 @@ func (re *Regexp) FindSubmatch(b []byte) [][]byte {
 // The return value is nil for no match.
 func (re *Regexp) FindStringSubmatch(s string) []string {
 	var dstCap [4]int
-	a := re.find(nil, nil, s, 0, re.prog.NumCap, dstCap[:0])
+	a := re.find(re.astMapFor(nil, s), nil, nil, s, 0, re.prog.NumCap, dstCap[:0])
 	if a == nil {
 		return nil
 	}
@@ -901,14 +908,14 @@ func (re *Regexp) FindStringSubmatch(s string) []string {
 // The overall match is b[m[0]:m[1]], the first submatch is b[m[2]:m[3]], and so on.
 // The return value is nil for no match.
 func (re *Regexp) FindSubmatchIndex(b []byte) []int {
-	return re.pad(re.find(nil, b, "", 0, re.prog.NumCap, nil))
+	return re.pad(re.find(re.astMapFor(b, ""), nil, b, "", 0, re.prog.NumCap, nil))
 }
 
 // FindStringSubmatchIndex returns the first match for re in s, including submatches.
 // The overall match is s[m[0]:m[1]], the first submatch is s[m[2]:m[3]], and so on.
 // The return value is nil for no match.
 func (re *Regexp) FindStringSubmatchIndex(s string) []int {
-	return re.pad(re.find(nil, nil, s, 0, re.prog.NumCap, nil))
+	return re.pad(re.find(re.astMapFor(nil, s), nil, nil, s, 0, re.prog.NumCap, nil))
 }
 
 // FindReaderSubmatchIndex returns the first match for re in r, including submatches.
@@ -919,7 +926,7 @@ func (re *Regexp) FindStringSubmatchIndex(s string) []int {
 // FindReaderSubmatchIndex may read arbitrarily far from r,
 // including reading beyond the returned match.
 func (re *Regexp) FindReaderSubmatchIndex(r io.RuneReader) []int {
-	return re.pad(re.find(r, nil, "", 0, re.prog.NumCap, nil))
+	return re.pad(re.find(nil, r, nil, "", 0, re.prog.NumCap, nil))
 }
 
 // all returns at most n matches for re in b.

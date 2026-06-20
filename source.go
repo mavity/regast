@@ -153,6 +153,19 @@ func (m *astMap) nextSignificant(pos int) int {
 	return pos
 }
 
+// prevSignificantEnd returns the largest q <= pos such that the byte at q-1 is
+// significant (i.e. trailing insignificant bytes before pos are trimmed). Used
+// to snap a capture-close boundary back onto the token stream.
+func (m *astMap) prevSignificantEnd(pos int) int {
+	if pos > len(m.src) {
+		pos = len(m.src)
+	}
+	for pos > 0 && m.tokenIndexAt(pos-1) < 0 {
+		pos--
+	}
+	return pos
+}
+
 // gapBoundary implements the Token-Stream Boundary Rule: it reports whether L
 // and R fall in *different* significant tokens, i.e. the cursor between them is
 // a crisp token seam rather than the middle of one token.
@@ -163,6 +176,24 @@ func (m *astMap) gapBoundary(l, r int) bool {
 		return false
 	}
 	return tl != tr
+}
+
+// astMapFor builds the structural map for a node-group match over b or s,
+// returning nil when the regexp has no node-groups or the source cannot be
+// parsed at all (in which case node-groups simply find no matches).
+func (re *Regexp) astMapFor(b []byte, s string) *astMap {
+	if !re.prog.HasNodeGroup {
+		return nil
+	}
+	src := b
+	if src == nil {
+		src = []byte(s)
+	}
+	am, err := newASTMap("", src)
+	if err != nil {
+		return nil
+	}
+	return am
 }
 
 // endsForStart returns the end offsets of all AST nodes beginning exactly at

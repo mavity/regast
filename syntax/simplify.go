@@ -16,7 +16,7 @@ func (re *Regexp) Simplify() *Regexp {
 		return nil
 	}
 	switch re.Op {
-	case OpCapture, OpConcat, OpAlternate:
+	case OpCapture, OpConcat, OpAlternate, OpNodeGroup:
 		// Simplify children, building new Regexp if children change.
 		nre := re
 		for i, sub := range re.Sub {

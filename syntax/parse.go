@@ -77,7 +77,23 @@ const (
 const (
 	opLeftParen = opPseudo + iota
 	opVerticalBar
+	opLeftNode
 )
+
+// Node-group brackets (regast extension).
+const (
+	nodeOpenRune  = '⦃' // U+2983 LEFT WHITE CURLY BRACKET
+	nodeCloseRune = '⦄' // U+2984 RIGHT WHITE CURLY BRACKET
+)
+
+// isPatternSpaceByte reports whether b is whitespace in a node-group pattern.
+func isPatternSpaceByte(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	}
+	return false
+}
 
 // maxHeight is the maximum height of a regexp parse tree.
 // It is somewhat arbitrarily chosen, but the idea is to be large enough
@@ -129,6 +145,7 @@ type parser struct {
 	stack       []*Regexp // stack of parsed expressions
 	free        *Regexp
 	numCap      int // number of capturing groups seen
+	nodeDepth   int // current node-group nesting depth (regast extension)
 	wholeRegexp string
 	tmpClass    []rune            // temporary char class work space
 	numRegexp   int               // number of regexps allocated
@@ -248,6 +265,8 @@ func (p *parser) calcSize(re *Regexp, force bool) int64 {
 		}
 		// x{2,5} = xx(x(x(x)?)?)?
 		size = int64(re.Max)*sub + int64(re.Max-re.Min)
+	case OpNodeGroup:
+		size = 2 + p.calcSize(re.Sub[0], false)
 	}
 
 	size = max(1, size)
@@ -928,7 +947,35 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 			if c, t, err = nextRune(t); err != nil {
 				return nil, err
 			}
-			p.literal(c)
+			switch {
+			case c == nodeOpenRune:
+				p.numCap++
+				p.op(opLeftNode).Cap = p.numCap
+				p.nodeDepth++
+			case c == nodeCloseRune:
+				if err = p.parseRightNode(); err != nil {
+					return nil, err
+				}
+			case p.nodeDepth > 0 && c < utf8.RuneSelf && isPatternSpaceByte(byte(c)):
+				// In-node whitespace becomes a structural gap. Collapse the
+				// run and trim leading/trailing gaps (which can never match a
+				// real token seam at a node boundary).
+				for len(t) > 0 && isPatternSpaceByte(t[0]) {
+					t = t[1:]
+				}
+				trailing := t == "" || strings.HasPrefix(t, string(nodeCloseRune))
+				leading := false
+				if n := len(p.stack); n > 0 {
+					if top := p.stack[n-1].Op; top == opLeftNode || top == opVerticalBar {
+						leading = true
+					}
+				}
+				if !trailing && !leading {
+					p.op(OpGap)
+				}
+			default:
+				p.literal(c)
+			}
 
 		case '(':
 			if p.flags&PerlX != 0 && len(t) >= 2 && t[1] == '?' {
@@ -1437,6 +1484,40 @@ func (p *parser) parseRightParen() error {
 		re2.Sub[0] = re1
 		p.push(re2)
 	}
+	return nil
+}
+
+// parseRightNode handles a closing node-group bracket, mirroring
+// parseRightParen but wrapping the contents in an OpNodeGroup (itself wrapped
+// in a capture so the group's $k expands to the matched node's text).
+func (p *parser) parseRightNode() error {
+	p.concat()
+	if p.swapVerticalBar() {
+		p.stack = p.stack[:len(p.stack)-1]
+	}
+	p.alternate()
+
+	n := len(p.stack)
+	if n < 2 {
+		return &Error{ErrUnexpectedParen, p.wholeRegexp}
+	}
+	re1 := p.stack[n-1]
+	re2 := p.stack[n-2]
+	p.stack = p.stack[:n-2]
+	if re2.Op != opLeftNode {
+		return &Error{ErrUnexpectedParen, p.wholeRegexp}
+	}
+	p.flags = re2.Flags
+	if p.nodeDepth > 0 {
+		p.nodeDepth--
+	}
+	ng := p.newRegexp(OpNodeGroup)
+	ng.Sub = ng.Sub0[:1]
+	ng.Sub[0] = re1
+	re2.Op = OpCapture
+	re2.Sub = re2.Sub0[:1]
+	re2.Sub[0] = ng
+	p.push(re2)
 	return nil
 }
 

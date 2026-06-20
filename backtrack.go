@@ -22,9 +22,88 @@ import (
 // A job is an entry on the backtracker's job stack. It holds
 // the instruction pc and the position in the input.
 type job struct {
-	pc  uint32
-	arg bool
-	pos int
+	pc   uint32
+	arg  bool
+	pos  int
+	nctx nodeCtx
+}
+
+// maxNodeNest bounds node-group nesting depth carried on a job. Real patterns
+// nest a handful of levels at most.
+const maxNodeNest = 8
+
+// nodeCtx is the per-branch stack of bounding AST node ends while matching
+// inside node-groups. It is a flat value (no heap), copied with the job.
+// fresh marks that no significant character has been consumed yet at the
+// current node level (so the first atom skips the junction rule); pendGap marks
+// that an InstGap just validated and crossed a token seam.
+type nodeCtx struct {
+	ends    [maxNodeNest]int32
+	depth   int8
+	fresh   bool
+	pendGap bool
+}
+
+func (n nodeCtx) top() int32 {
+	if n.depth <= 0 {
+		return 1<<31 - 1
+	}
+	return n.ends[n.depth-1]
+}
+
+func (n nodeCtx) pushEnd(end int32) nodeCtx {
+	if n.depth < maxNodeNest {
+		n.ends[n.depth] = end
+		n.depth++
+		n.fresh = true
+		n.pendGap = false
+	}
+	return n
+}
+
+func (n nodeCtx) popEnd() nodeCtx {
+	if n.depth > 0 {
+		n.depth--
+	}
+	n.fresh = false
+	n.pendGap = false
+	return n
+}
+
+// isWordByte reports whether c is an ASCII identifier byte.
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// nodeMatchPos applies the node-group whitespace rules to decide where the next
+// significant rune to match begins. It returns the byte position p, the updated
+// context, and ok=false if no legal position exists (the branch must die).
+func (b *bitState) nodeMatchPos(pos int, nctx nodeCtx) (p int, nn nodeCtx, ok bool) {
+	end := int(nctx.top())
+	switch {
+	case nctx.fresh:
+		// First atom in this node: no junction constraint.
+		nctx.fresh = false
+		nctx.pendGap = false
+		p = b.am.nextSignificant(pos)
+	case nctx.pendGap:
+		// A gap already validated the token seam and advanced pos to it.
+		nctx.pendGap = false
+		p = pos
+	default:
+		// No gap: a word|word token seam may not be crossed (that would merge
+		// or split two identifier tokens). Other seams are free.
+		p = b.am.nextSignificant(pos)
+		if pos > 0 && p < len(b.am.src) &&
+			b.am.tokenIndexAt(pos-1) != b.am.tokenIndexAt(p) &&
+			isWordByte(b.am.src[pos-1]) && isWordByte(b.am.src[p]) {
+			return 0, nctx, false
+		}
+	}
+	if p >= end {
+		return 0, nctx, false
+	}
+	return p, nctx, true
 }
 
 const (
@@ -41,6 +120,11 @@ type bitState struct {
 	jobs     []job
 	visited  []uint32
 
+	// regast node-group extension:
+	am       *astMap // structural map of the input (nil for plain matching)
+	steps    int     // work counter (visited prune is disabled in node regions)
+	maxSteps int     // safety cap on steps
+
 	inputs inputs
 }
 
@@ -56,6 +140,7 @@ func newBitState() *bitState {
 
 func freeBitState(b *bitState) {
 	b.inputs.clear()
+	b.am = nil
 	bitStatePool.Put(b)
 }
 
@@ -125,12 +210,18 @@ func (b *bitState) shouldVisit(pc uint32, pos int) bool {
 }
 
 // push pushes (pc, pos, arg) onto the job stack if it should be
-// visited.
-func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool) {
+// visited. Inside a node-group region (nctx.depth > 0) the (pc,pos) visited
+// prune is bypassed, because the same (pc,pos) can legitimately recur under a
+// different bounding node end; termination there is guaranteed by the fixed AST
+// bounds plus the step cap.
+func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) {
 	// Only check shouldVisit when arg is false.
 	// When arg is true, we are continuing a previous visit.
-	if re.prog.Inst[pc].Op != syntax.InstFail && (arg || b.shouldVisit(pc, pos)) {
-		b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos})
+	if re.prog.Inst[pc].Op == syntax.InstFail {
+		return
+	}
+	if arg || nctx.depth > 0 || b.shouldVisit(pc, pos) {
+		b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos, nctx: nctx})
 	}
 }
 
@@ -138,14 +229,20 @@ func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool) {
 func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 	longest := re.longest
 
-	b.push(re, pc, pos, false)
+	b.push(re, pc, pos, false, nodeCtx{})
 	for len(b.jobs) > 0 {
 		l := len(b.jobs) - 1
 		// Pop job off the stack.
 		pc := b.jobs[l].pc
 		pos := b.jobs[l].pos
 		arg := b.jobs[l].arg
+		nctx := b.jobs[l].nctx
 		b.jobs = b.jobs[:l]
+
+		b.steps++
+		if b.steps > b.maxSteps {
+			return false
+		}
 
 		// Optimization: rather than push and pop,
 		// code that is going to Push and continue
@@ -156,7 +253,10 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 		// manipulation.
 		goto Skip
 	CheckAndLoop:
-		if !b.shouldVisit(pc, pos) {
+		// Inside a node-group region the (pc,pos) visited prune is unsafe (the
+		// same state can recur under a different bounding node end), so skip it
+		// there; the AST bounds plus the step cap ensure termination.
+		if nctx.depth == 0 && !b.shouldVisit(pc, pos) {
 			continue
 		}
 	Skip:
@@ -183,7 +283,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 				pc = inst.Arg
 				goto CheckAndLoop
 			} else {
-				b.push(re, pc, pos, true)
+				b.push(re, pc, pos, true, nctx)
 				pc = inst.Out
 				goto CheckAndLoop
 			}
@@ -193,49 +293,122 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			switch re.prog.Inst[inst.Out].Op {
 			case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
 				// inst.Arg is the match.
-				b.push(re, inst.Arg, pos, false)
+				b.push(re, inst.Arg, pos, false, nctx)
 				pc = inst.Arg
 				pos = b.end
 				goto CheckAndLoop
 			}
 			// inst.Out is the match - non-greedy
-			b.push(re, inst.Out, b.end, false)
+			b.push(re, inst.Out, b.end, false, nctx)
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRune:
-			r, width := i.step(pos)
+			p := pos
+			if nctx.depth > 0 {
+				var ok bool
+				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+					continue
+				}
+			}
+			r, width := i.step(p)
 			if !inst.MatchRune(r) {
 				continue
 			}
-			pos += width
+			pos = p + width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRune1:
-			r, width := i.step(pos)
+			p := pos
+			if nctx.depth > 0 {
+				var ok bool
+				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+					continue
+				}
+			}
+			r, width := i.step(p)
 			if r != inst.Rune[0] {
 				continue
 			}
-			pos += width
+			pos = p + width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRuneAnyNotNL:
-			r, width := i.step(pos)
+			p := pos
+			if nctx.depth > 0 {
+				var ok bool
+				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+					continue
+				}
+			}
+			r, width := i.step(p)
 			if r == '\n' || r == endOfText {
 				continue
 			}
-			pos += width
+			pos = p + width
 			pc = inst.Out
 			goto CheckAndLoop
 
 		case syntax.InstRuneAny:
-			r, width := i.step(pos)
+			p := pos
+			if nctx.depth > 0 {
+				var ok bool
+				if p, nctx, ok = b.nodeMatchPos(pos, nctx); !ok {
+					continue
+				}
+			}
+			r, width := i.step(p)
 			if r == endOfText {
 				continue
 			}
-			pos += width
+			pos = p + width
+			pc = inst.Out
+			goto CheckAndLoop
+
+		case syntax.InstNodeGroup:
+			if b.am == nil {
+				continue
+			}
+			ends := b.am.endsForStart(pos)
+			// Push candidate node ends ascending so the largest is on top of the
+			// stack and tried first (greedy). The exact-landing check at
+			// InstNodeExit decides which actually fits.
+			for k := 0; k < len(ends); k++ {
+				if nctx.depth >= maxNodeNest {
+					break
+				}
+				b.push(re, inst.Out, pos, false, nctx.pushEnd(int32(ends[k])))
+			}
+			continue
+
+		case syntax.InstNodeExit:
+			if nctx.depth == 0 || b.am == nil {
+				continue
+			}
+			end := int(nctx.top())
+			// The inner pattern must have consumed the node's significant
+			// content: no significant byte may remain before end.
+			if b.am.nextSignificant(pos) < end {
+				continue
+			}
+			nctx = nctx.popEnd()
+			pos = end
+			pc = inst.Out
+			goto CheckAndLoop
+
+		case syntax.InstGap:
+			if b.am == nil {
+				continue
+			}
+			r := b.am.nextSignificant(pos)
+			if !b.am.gapBoundary(pos-1, r) {
+				continue
+			}
+			pos = r
+			nctx.pendGap = true
+			nctx.fresh = false
 			pc = inst.Out
 			goto CheckAndLoop
 
@@ -247,8 +420,19 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 			} else {
 				if inst.Arg < uint32(len(b.cap)) {
 					// Capture pos to register, but save old value.
-					b.push(re, pc, b.cap[inst.Arg], true) // come back when we're done.
-					b.cap[inst.Arg] = pos
+					// Inside a node region, snap the recorded boundary to a
+					// significant byte (open forward, close back) so a group
+					// never includes surrounding whitespace/comments.
+					val := pos
+					if nctx.depth > 0 && b.am != nil {
+						if inst.Arg&1 == 0 {
+							val = b.am.nextSignificant(pos)
+						} else {
+							val = b.am.prevSignificantEnd(pos)
+						}
+					}
+					b.push(re, pc, b.cap[inst.Arg], true, nctx) // come back when we're done.
+					b.cap[inst.Arg] = val
 				}
 				pc = inst.Out
 				goto CheckAndLoop
@@ -302,7 +486,7 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 }
 
 // backtrack runs a backtracking search of prog on the input starting at pos.
-func (re *Regexp) backtrack(ib []byte, is string, pos int, ncap int, dstCap []int) []int {
+func (re *Regexp) backtrack(am *astMap, ib []byte, is string, pos int, ncap int, dstCap []int) []int {
 	startCond := re.cond
 	if startCond == ^syntax.EmptyOp(0) { // impossible
 		return nil
@@ -315,6 +499,12 @@ func (re *Regexp) backtrack(ib []byte, is string, pos int, ncap int, dstCap []in
 	b := newBitState()
 	i, end := b.inputs.init(nil, ib, is)
 	b.reset(re.prog, end, ncap)
+	b.am = am
+	b.steps = 0
+	b.maxSteps = 4 * (end + 1) * len(re.prog.Inst)
+	if b.maxSteps < (1 << 20) {
+		b.maxSteps = 1 << 20
+	}
 
 	// Anchored search must start at the beginning of the input
 	if startCond&syntax.EmptyBeginText != 0 {
