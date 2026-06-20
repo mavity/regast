@@ -16,9 +16,10 @@ import (
 
 // A Prog is a compiled regular expression program.
 type Prog struct {
-	Inst   []Inst
-	Start  int // index of start instruction
-	NumCap int // number of InstCapture insts in re
+	Inst         []Inst
+	Start        int  // index of start instruction
+	NumCap       int  // number of InstCapture insts in re
+	HasNodeGroup bool // true if the program contains regast node-group instructions
 }
 
 // An InstOp is an instruction opcode.
@@ -36,6 +37,9 @@ const (
 	InstRune1
 	InstRuneAny
 	InstRuneAnyNotNL
+	InstNodeGroup
+	InstNodeExit
+	InstGap
 )
 
 var instOpNames = []string{
@@ -50,6 +54,9 @@ var instOpNames = []string{
 	"InstRune1",
 	"InstRuneAny",
 	"InstRuneAnyNotNL",
+	"InstNodeGroup",
+	"InstNodeExit",
+	"InstGap",
 }
 
 func (i InstOp) String() string {

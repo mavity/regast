@@ -9,7 +9,7 @@ import (
 	"internal/race"
 	"internal/testenv"
 	"reflect"
-	"regexp/syntax"
+	"mohabbat/mohabbat/regast/syntax"
 	"slices"
 	"strings"
 	"testing"

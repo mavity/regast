@@ -6,7 +6,7 @@ package regexp
 
 import (
 	"io"
-	"regexp/syntax"
+	"mohabbat/mohabbat/regast/syntax"
 	"sync"
 )
 

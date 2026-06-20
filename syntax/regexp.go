@@ -56,6 +56,8 @@ const (
 	OpRepeat                       // matches Sub[0] at least Min times, at most Max (Max == -1 is no limit)
 	OpConcat                       // matches concatenation of Subs
 	OpAlternate                    // matches alternation of Subs
+	OpNodeGroup                    // matches a whole Go AST node (regast extension)
+	OpGap                          // matches a required structural delimiter (regast extension)
 )
 
 const opPseudo Op = 128 // where pseudo-ops start

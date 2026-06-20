@@ -15,7 +15,7 @@
 package regexp
 
 import (
-	"regexp/syntax"
+	"mohabbat/mohabbat/regast/syntax"
 	"sync"
 )
 

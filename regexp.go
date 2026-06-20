@@ -64,7 +64,7 @@ import (
 	"bytes"
 	"io"
 	"iter"
-	"regexp/syntax"
+	"mohabbat/mohabbat/regast/syntax"
 	"slices"
 	"strconv"
 	"strings"
