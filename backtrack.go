@@ -123,7 +123,19 @@ const (
 	visitedBits        = 32
 	maxBacktrackProg   = 500        // len(prog.Inst) <= max
 	maxBacktrackVector = 256 * 1024 // bit vector size <= max (bits)
+
+	// Page-table block matrix geometry. The text coordinate space is sliced
+	// into uniform 512-byte windows; each window is backed by a dense bit block
+	// allocated lazily on first touch, so unvisited gaps cost zero memory.
+	rowShift = 9   // 2^9 = 512 bytes per block window
+	rowMask  = 511 // offset mask within a block window
 )
+
+// bitStateBlock is a dense, localized visited-bitset for a single 512-byte text
+// window. It holds 512*progLen bits, indexed by (offset-within-window, pc).
+type bitStateBlock struct {
+	bits []uint32
+}
 
 // nodeVisitKey uniquely identifies a node-region execution state for the
 // deduplicating prune: instruction, position, the exact bound chain (frame),
@@ -141,7 +153,15 @@ type bitState struct {
 	cap      []int
 	matchcap []int
 	jobs     []job
-	visited  []uint32
+
+	// Page-table block matrix replacing the flat visited bitvector. blocks is a
+	// sparse index of 512-byte text pages; each page is backed by a dense
+	// (512 * progLen)-bit block only once a thread first enters that window, so
+	// large unvisited text gaps consume zero bits. progLen and wordsPerBlock are
+	// cached per search to keep lazy block allocation and bit addressing fast.
+	blocks        []*bitStateBlock
+	wordsPerBlock uint32
+	progLen       uint32
 
 	// regast node-group extension:
 	am          *astMap                   // structural map of the input (nil for plain matching)
@@ -197,12 +217,24 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 		b.jobs = b.jobs[:0]
 	}
 
-	visitedSize := (len(prog.Inst)*(end+1) + visitedBits - 1) / visitedBits
-	if cap(b.visited) < visitedSize {
-		b.visited = make([]uint32, visitedSize, maxBacktrackVector/visitedBits)
+	// Page-table block matrix. Cache the per-block geometry, then reset the
+	// sparse page index to all-nil so each window's dense block is (re)allocated
+	// lazily on first touch. This replaces the old flat
+	// make([]uint32, visitedSize, maxBacktrackVector/visitedBits) allocation,
+	// which panicked (len > cap) once a node-group program forced the
+	// backtracker past the 256KB vector cap on a large input.
+	b.progLen = uint32(len(prog.Inst))
+	bitsPerBlock := uint32(1<<rowShift) * b.progLen
+	b.wordsPerBlock = (bitsPerBlock + visitedBits - 1) / visitedBits
+
+	numBlocks := (end >> rowShift) + 1
+	if cap(b.blocks) < numBlocks {
+		b.blocks = make([]*bitStateBlock, numBlocks)
 	} else {
-		b.visited = b.visited[:visitedSize]
-		clear(b.visited) // set to 0
+		b.blocks = b.blocks[:numBlocks]
+		for i := range b.blocks {
+			b.blocks[i] = nil
+		}
 	}
 
 	if cap(b.cap) < ncap {
@@ -239,13 +271,26 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 }
 
 // shouldVisit reports whether the combination of (pc, pos) has not
-// been visited yet.
+// been visited yet, recording it if new. It uses the page-table block matrix:
+// the dense bit block for the 512-byte window containing pos is allocated
+// lazily on first touch, giving O(1) lookups with sparse memory.
 func (b *bitState) shouldVisit(pc uint32, pos int) bool {
-	n := uint(int(pc)*(b.end+1) + pos)
-	if b.visited[n/visitedBits]&(1<<(n&(visitedBits-1))) != 0 {
+	blockIdx := pos >> rowShift
+	offset := uint32(pos & rowMask)
+
+	block := b.blocks[blockIdx]
+	if block == nil {
+		block = &bitStateBlock{bits: make([]uint32, b.wordsPerBlock)}
+		b.blocks[blockIdx] = block
+	}
+
+	bitIdx := offset*b.progLen + pc
+	word := bitIdx >> 5
+	mask := uint32(1) << (bitIdx & 31)
+	if block.bits[word]&mask != 0 {
 		return false
 	}
-	b.visited[n/visitedBits] |= 1 << (n & (visitedBits - 1))
+	block.bits[word] |= mask
 	return true
 }
 
