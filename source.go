@@ -29,9 +29,10 @@ type astMap struct {
 	tokStart []int
 	tokEnd   []int
 
-	// AST node spans, sorted by (start, end)
+	// AST node spans, sorted by (start, end); nodeFlags: 0=code, 1=// comment, 2=/* comment
 	nodeStart []int
 	nodeEnd   []int
+	nodeFlags []byte
 }
 
 // newASTMap scans and parses src once, building both tables. Parsing is
@@ -85,7 +86,10 @@ func newASTMap(filename string, src []byte) (*astMap, error) {
 		return nil, fmt.Errorf("regast: cannot parse %s: %w", filename, err)
 	}
 
-	type se struct{ s, e int }
+	type se struct {
+		s, e int
+		flag byte
+	}
 	var nodes []se
 	ast.Inspect(f, func(n ast.Node) bool {
 		if n == nil {
@@ -97,7 +101,17 @@ func newASTMap(filename string, src []byte) (*astMap, error) {
 		st := pfset.Position(n.Pos()).Offset
 		en := pfset.Position(n.End()).Offset
 		if en > st && st >= 0 && en <= len(src) {
-			nodes = append(nodes, se{st, en})
+			var flag byte
+			if c, ok := n.(*ast.Comment); ok {
+				if len(c.Text) >= 2 && c.Text[0] == '/' {
+					if c.Text[1] == '/' {
+						flag = 1
+					} else if c.Text[1] == '*' {
+						flag = 2
+					}
+				}
+			}
+			nodes = append(nodes, se{st, en, flag})
 		}
 		return true
 	})
@@ -110,6 +124,7 @@ func newASTMap(filename string, src []byte) (*astMap, error) {
 	for _, nd := range nodes {
 		m.nodeStart = append(m.nodeStart, nd.s)
 		m.nodeEnd = append(m.nodeEnd, nd.e)
+		m.nodeFlags = append(m.nodeFlags, nd.flag)
 	}
 	return m, nil
 }
@@ -175,6 +190,37 @@ func (m *astMap) prevSignificantEnd(pos int) int {
 	return pos
 }
 
+// nextNonCommentWhitespace advances pos past whitespace-only bytes (space, tab,
+// newline, CR). Used for capture-open snapping inside comment node-groups.
+func (m *astMap) nextNonCommentWhitespace(pos int) int {
+	for pos < len(m.src) {
+		b := m.src[pos]
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			pos++
+		} else {
+			break
+		}
+	}
+	return pos
+}
+
+// prevNonCommentWhitespaceEnd returns the largest q <= pos such that src[q-1]
+// is not whitespace. Used for capture-close snapping inside comment node-groups.
+func (m *astMap) prevNonCommentWhitespaceEnd(pos int) int {
+	if pos > len(m.src) {
+		pos = len(m.src)
+	}
+	for pos > 0 {
+		b := m.src[pos-1]
+		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
+			pos--
+		} else {
+			break
+		}
+	}
+	return pos
+}
+
 // gapBoundary implements the Token-Stream Boundary Rule: it reports whether L
 // and R fall in *different* significant tokens, i.e. the cursor between them is
 // a crisp token seam rather than the middle of one token.
@@ -205,9 +251,16 @@ func (re *Regexp) astMapFor(b []byte, s string) *astMap {
 	return am
 }
 
-// endsForStart returns the end offsets of all AST nodes beginning exactly at
-// pos, ascending and de-duplicated.
+// endsForStart returns the end offsets of all code (non-comment) AST nodes
+// beginning exactly at pos, ascending and de-duplicated.
 func (m *astMap) endsForStart(pos int) []int {
+	return m.endsForStartKind(pos, 0)
+}
+
+// endsForStartKind returns the end offsets of AST nodes with the specified kind
+// that begin exactly at pos, ascending and de-duplicated.
+// kind: 0=code node, 1=// line comment, 2=/* */ block comment.
+func (m *astMap) endsForStartKind(pos int, kind byte) []int {
 	lo, hi := 0, len(m.nodeStart)
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
@@ -219,9 +272,11 @@ func (m *astMap) endsForStart(pos int) []int {
 	}
 	var ends []int
 	for lo < len(m.nodeStart) && m.nodeStart[lo] == pos {
-		e := m.nodeEnd[lo]
-		if len(ends) == 0 || ends[len(ends)-1] != e {
-			ends = append(ends, e)
+		if m.nodeFlags[lo] == kind {
+			e := m.nodeEnd[lo]
+			if len(ends) == 0 || ends[len(ends)-1] != e {
+				ends = append(ends, e)
+			}
 		}
 		lo++
 	}

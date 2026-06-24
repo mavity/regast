@@ -155,7 +155,13 @@ func (c *compiler) compile(re *Regexp) frag {
 		}
 		return f
 	case OpNodeGroup:
-		return c.nodeGroup(c.compile(re.Sub[0]))
+		var kind uint8
+		if re.Flags&NodeLineComment != 0 {
+			kind = 1
+		} else if re.Flags&NodeBlockComment != 0 {
+			kind = 2
+		}
+		return c.nodeGroup(c.compile(re.Sub[0]), kind)
 	case OpGap:
 		return c.gap()
 	}
@@ -185,10 +191,12 @@ func (c *compiler) gap() frag {
 // nodeGroup emits InstNodeGroup ... InstNodeExit around the inner fragment.
 // The InstNodeGroup's Out enters the inner pattern; the inner pattern's exits
 // are patched to the InstNodeExit; the InstNodeExit's Out is the continuation.
-func (c *compiler) nodeGroup(inner frag) frag {
+func (c *compiler) nodeGroup(inner frag, kind uint8) frag {
 	c.p.HasNodeGroup = true
 	ng := c.inst(InstNodeGroup)
+	c.p.Inst[ng.i].Arg = uint32(kind)
 	exit := c.inst(InstNodeExit)
+	c.p.Inst[exit.i].Arg = uint32(kind)
 	if inner.i == 0 {
 		c.p.Inst[ng.i].Out = exit.i
 	} else {

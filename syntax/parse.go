@@ -56,16 +56,18 @@ func (e ErrorCode) String() string {
 type Flags uint16
 
 const (
-	FoldCase      Flags = 1 << iota // case-insensitive match
-	Literal                         // treat pattern as literal string
-	ClassNL                         // allow character classes like [^a-z] and [[:space:]] to match newline
-	DotNL                           // allow . to match newline
-	OneLine                         // treat ^ and $ as only matching at beginning and end of text
-	NonGreedy                       // make repetition operators default to non-greedy
-	PerlX                           // allow Perl extensions
-	UnicodeGroups                   // allow \p{Han}, \P{Han} for Unicode group and negation
-	WasDollar                       // regast OpEndText was $, not \z
-	Simple                          // regast contains no counted repetition
+	FoldCase         Flags = 1 << iota // case-insensitive match
+	Literal                            // treat pattern as literal string
+	ClassNL                            // allow character classes like [^a-z] and [[:space:]] to match newline
+	DotNL                              // allow . to match newline
+	OneLine                            // treat ^ and $ as only matching at beginning and end of text
+	NonGreedy                          // make repetition operators default to non-greedy
+	PerlX                              // allow Perl extensions
+	UnicodeGroups                      // allow \p{Han}, \P{Han} for Unicode group and negation
+	WasDollar                          // regast OpEndText was $, not \z
+	Simple                             // regast contains no counted repetition
+	NodeLineComment                    // node-group matches a // line comment
+	NodeBlockComment                   // node-group matches a /* */ block comment
 
 	MatchNL = ClassNL | DotNL
 
@@ -82,8 +84,8 @@ const (
 
 // Node-group brackets (regast extension).
 const (
-	nodeOpenRune  = '⦃' // U+2983 LEFT WHITE CURLY BRACKET
-	nodeCloseRune = '⦄' // U+2984 RIGHT WHITE CURLY BRACKET
+	nodeOpenRune  = '⦅' // U+2985 LEFT WHITE PARENTHESIS
+	nodeCloseRune = '⦆' // U+2986 RIGHT WHITE PARENTHESIS
 )
 
 // isPatternSpaceByte reports whether b is whitespace in a node-group pattern.
@@ -93,6 +95,45 @@ func isPatternSpaceByte(b byte) bool {
 		return true
 	}
 	return false
+}
+
+// peekNodeGroupKind examines the remaining pattern text t (immediately after ⦅
+// has been consumed) to determine whether this node-group is a comment pattern.
+// Returns 0 for a code node-group, 1 for // line comments, 2 for /* */ block
+// comments. For kind 2, the closing */ must be the last non-whitespace content
+// before the ⦆ that closes the node-group.
+func peekNodeGroupKind(t string) byte {
+	// Skip leading ASCII whitespace.
+	i := 0
+	for i < len(t) && isPatternSpaceByte(t[i]) {
+		i++
+	}
+	// Line comment: starts with //
+	if i+1 < len(t) && t[i] == '/' && t[i+1] == '/' {
+		return 1
+	}
+	// Block comment: starts with /* and must end with */ before ⦆
+	if i+1 < len(t) && t[i] == '/' && t[i+1] == '*' {
+		j := i + 2
+		for j+1 < len(t) {
+			if t[j] == '*' && t[j+1] == '/' {
+				j += 2
+				break
+			}
+			j++
+		}
+		// After */, only whitespace then ⦆ is allowed.
+		for j < len(t) && isPatternSpaceByte(t[j]) {
+			j++
+		}
+		if j < len(t) {
+			r, _ := utf8.DecodeRuneInString(t[j:])
+			if r == nodeCloseRune {
+				return 2
+			}
+		}
+	}
+	return 0
 }
 
 // maxHeight is the maximum height of a regast parse tree.
@@ -141,18 +182,19 @@ const (
 )
 
 type parser struct {
-	flags       Flags     // parse mode flags
-	stack       []*Regexp // stack of parsed expressions
-	free        *Regexp
-	numCap      int // number of capturing groups seen
-	nodeDepth   int // current node-group nesting depth (regast extension)
-	wholeRegexp string
-	tmpClass    []rune            // temporary char class work space
-	numRegexp   int               // number of regexps allocated
-	numRunes    int               // number of runes in char classes
-	repeats     int64             // product of all repetitions seen
-	height      map[*Regexp]int   // regast height, for height limit check
-	size        map[*Regexp]int64 // regast compiled size, for size limit check
+	flags            Flags     // parse mode flags
+	stack            []*Regexp // stack of parsed expressions
+	free             *Regexp
+	numCap           int // number of capturing groups seen
+	nodeDepth        int // current node-group nesting depth (regast extension)
+	commentGroupKind int // kind of active comment node-group (0=none, 1=// line, 2=/* */ block)
+	wholeRegexp      string
+	tmpClass         []rune            // temporary char class work space
+	numRegexp        int               // number of regexps allocated
+	numRunes         int               // number of runes in char classes
+	repeats          int64             // product of all repetitions seen
+	height           map[*Regexp]int   // regast height, for height limit check
+	size             map[*Regexp]int64 // regast compiled size, for size limit check
 }
 
 func (p *parser) newRegexp(op Op) *Regexp {
@@ -950,8 +992,33 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 			switch {
 			case c == nodeOpenRune:
 				p.numCap++
-				p.op(opLeftNode).Cap = p.numCap
+				marker := p.op(opLeftNode)
+				marker.Cap = p.numCap
 				p.nodeDepth++
+				switch peekNodeGroupKind(t) {
+				case 1: // line comment: consume "//" as literals
+					marker.Flags |= NodeLineComment
+					p.commentGroupKind = 1
+					for len(t) > 0 && isPatternSpaceByte(t[0]) {
+						t = t[1:]
+					}
+					if len(t) >= 2 && t[0] == '/' && t[1] == '/' {
+						p.literal('/')
+						p.literal('/')
+						t = t[2:]
+					}
+				case 2: // block comment: consume "/*" as literals
+					marker.Flags |= NodeBlockComment
+					p.commentGroupKind = 2
+					for len(t) > 0 && isPatternSpaceByte(t[0]) {
+						t = t[1:]
+					}
+					if len(t) >= 2 && t[0] == '/' && t[1] == '*' {
+						p.literal('/')
+						p.literal('*')
+						t = t[2:]
+					}
+				}
 			case c == nodeCloseRune:
 				if err = p.parseRightNode(); err != nil {
 					return nil, err
@@ -1022,6 +1089,13 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 				return nil, err
 			}
 		case '*', '+', '?':
+			// In a block comment node-group, the sequence */ is the end delimiter
+			// and must be treated as literals, not as a quantifier.
+			if p.commentGroupKind == 2 && t[0] == '*' && len(t) > 1 && t[1] == '/' {
+				p.literal('*')
+				t = t[1:]
+				break BigSwitch
+			}
 			before := t
 			switch t[0] {
 			case '*':
@@ -1514,6 +1588,13 @@ func (p *parser) parseRightNode() error {
 	ng := p.newRegexp(OpNodeGroup)
 	ng.Sub = ng.Sub0[:1]
 	ng.Sub[0] = re1
+	if re2.Flags&NodeLineComment != 0 {
+		ng.Flags |= NodeLineComment
+		p.commentGroupKind = 0
+	} else if re2.Flags&NodeBlockComment != 0 {
+		ng.Flags |= NodeBlockComment
+		p.commentGroupKind = 0
+	}
 	re2.Op = OpCapture
 	re2.Sub = re2.Sub0[:1]
 	re2.Sub[0] = ng

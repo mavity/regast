@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseNodeGroup(t *testing.T) {
-	re, err := Parse(`⦃a\.b⦄`, Perl)
+	re, err := Parse(`⦅a\.b⦆`, Perl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestParseNodeGroup(t *testing.T) {
 
 func TestParseNodeGap(t *testing.T) {
 	// In-node whitespace becomes a gap; outside, it stays literal.
-	re, err := Parse(`⦃a b⦄`, Perl)
+	re, err := Parse(`⦅a b⦆`, Perl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestParseNodeGap(t *testing.T) {
 }
 
 func TestParseNodeNested(t *testing.T) {
-	re, err := Parse(`⦃⦃\w+⦄\.\w+⦄`, Perl)
+	re, err := Parse(`⦅⦅\w+⦆\.\w+⦆`, Perl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,5 +66,46 @@ func TestParseNodeNested(t *testing.T) {
 	}
 	if strings.Count(prog.String(), "nodegroup") != 2 {
 		t.Errorf("expected 2 nodegroup instructions:\n%s", prog.String())
+	}
+}
+
+func TestParseCommentNodeGroup(t *testing.T) {
+	// Line comment node-group.
+	re, err := Parse(`⦅// TODO⦆`, Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re.Op != OpCapture || re.Sub[0].Op != OpNodeGroup {
+		t.Fatalf("unexpected structure: %v", re.Op)
+	}
+	if re.Sub[0].Flags&NodeLineComment == 0 {
+		t.Errorf("expected NodeLineComment flag on OpNodeGroup")
+	}
+	if re.Sub[0].Flags&NodeBlockComment != 0 {
+		t.Errorf("unexpected NodeBlockComment flag")
+	}
+
+	// Block comment node-group.
+	re2, err := Parse(`⦅/* abc */⦆`, Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re2.Op != OpCapture || re2.Sub[0].Op != OpNodeGroup {
+		t.Fatalf("unexpected structure: %v", re2.Op)
+	}
+	if re2.Sub[0].Flags&NodeBlockComment == 0 {
+		t.Errorf("expected NodeBlockComment flag on OpNodeGroup")
+	}
+	if re2.Sub[0].Flags&NodeLineComment != 0 {
+		t.Errorf("unexpected NodeLineComment flag")
+	}
+
+	// Non-comment node-group: /* without closing */ before ⦆ is code group.
+	re3, err := Parse(`⦅/* abc */ code⦆`, Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if re3.Sub[0].Flags&(NodeLineComment|NodeBlockComment) != 0 {
+		t.Errorf("should be plain code node-group: %v", re3.Sub[0].Flags)
 	}
 }
