@@ -6,14 +6,14 @@
 
 ### 1. Rename a qualified identifier (ignores spacing)
 ```go
-re := regast.MustCompile(`⦃unix\.Major⦄`)
+re := regast.MustCompile(`⦅unix\.Major⦆`)
 // Both "unix.Major" and "unix  .  Major" match and are replaced.
 out := re.ReplaceAllString(src, `syscall.Major`)
 ```
 
 ### 2. Swap binary operands
 ```go
-re := regast.MustCompile(`⦃(\w+) \+ (\w+)⦄`)
+re := regast.MustCompile(`⦅(\w+) \+ (\w+)⦆`)
 // Matches "a+b", "a + b", "a /* comment */ + b"
 // $2 and $3 are the operand captures; $1 is the whole node-group text.
 out := re.ReplaceAllString(src, `$3 + $2`)
@@ -21,23 +21,30 @@ out := re.ReplaceAllString(src, `$3 + $2`)
 
 ### 3. Wrap a function call (stays inside its node)
 ```go
-re := regast.MustCompile(`⦃log\.Printf(\(.*\))⦄`)
-// Because it is wrapped in ⦃…⦄, the (.*) will not greedily 
+re := regast.MustCompile(`⦅log\.Printf(\(.*\))⦆`)
+// Because it is wrapped in ⦅…⦆, the (.*) will not greedily 
 // skip past the end of the call expression node.
 out := re.ReplaceAllString(src, `logger.Log$2`)
 ```
 
 ### 4. Match a specific field in a struct type
 ```go
-re := regast.MustCompile(`⦃Field int⦄`)
+re := regast.MustCompile(`⦅Field int⦆`)
 out := re.ReplaceAllString(src, `NewField int64`)
 ```
 
 ### 5. Simplify complex error checking
 ```go
 // Replace an error check block with a single-line check function
-re := regast.MustCompile(`if ⦃err != nil⦄ { return err }`)
+re := regast.MustCompile(`if ⦅err != nil⦆ { return err }`)
 out := re.ReplaceAllString(src, `check($1)`)
+```
+
+### 6. Match and rewrite specific comments
+```go
+// Matches " // TODO: fix" but NOT " /* TODO: fix */"
+re := regast.MustCompile(`⦅ // TODO: (\w+)⦆`)
+out := re.ReplaceAllString(src, `// FIXED($2)`)
 ```
 
 ## Running Tests
@@ -57,14 +64,14 @@ go test -v ./mohabbat/regast/ -run TestNode
 ---
 
 This package is a **vendored copy of Go's `regexp`** (cloned as a subtree),
-extended so a pattern may contain **node-groups** — `⦃ … ⦄` — that match a whole
+extended so a pattern may contain **node-groups** — `⦅ … ⦆` — that match a whole
 Go AST node with whitespace/comment-insensitive semantics. The proof-of-concept
 in `mohabbat/regast-poc` (its executor and golden tests) is the behavioural
 contract this re-implementation must satisfy.
 
 Callers use the **exact `regexp` API** (`MustCompile`, `FindStringSubmatchIndex`,
 `ReplaceAllString`, …). Plain patterns behave identically to upstream `regexp`.
-Patterns containing `⦃ … ⦄` become AST-aware, and the caller never has to know
+Patterns containing `⦅ … ⦆` become AST-aware, and the caller never has to know
 about ASTs or preprocessing — the engine owns the whole lifecycle of the input
 string.
 
@@ -191,13 +198,15 @@ opcodes, so every existing `syntax` test stays green.
 - **`syntax/regexp.go`**: add `OpNodeGroup`, `OpGap` to `Op`.
 - **`syntax/prog.go`**: add `InstNodeGroup`, `InstNodeExit`, `InstGap` to
   `InstOp` and `instOpNames`; add `Prog.HasNodeGroup bool`.
-- **`syntax/parse.go`**: scan `⦃` and `⦄` as native operators producing an
+- **`syntax/parse.go`**: scan `⦅` and `⦆` as native operators producing an
   `OpNodeGroup` subtree; a run of whitespace **inside** a node-group becomes an
   `OpGap` node (outside a node-group, whitespace is literal as today). Bracket
-  scanning is escape- and char-class-aware.
+  scanning is escape- and char-class-aware. **Comment nodes** are identified by
+  peeking for `//` or `/*` immediately after `⦅`.
 - **`syntax/compile.go`**: compile `OpNodeGroup` to
-  `InstNodeGroup{Arg: inner-start pc, Out: continuation pc}` terminated by an
-  `InstNodeExit`; compile `OpGap` to `InstGap`. Set `Prog.HasNodeGroup`.
+  `InstNodeGroup{Arg: flags, Out: continuation pc}` where `Arg` carries the
+  node kind (Code/LineComment/BlockComment); terminated by an `InstNodeExit`.
+  Compile `OpGap` to `InstGap`. Set `Prog.HasNodeGroup`.
   - If `$1 == node text` is wanted, the group is assigned a **real `Cap` index**
     in normal left-to-right order. Because these are first-class instructions and
     the only captures are real ones, submatch indices need **zero** correction —
@@ -220,15 +229,40 @@ front end already produces — no second tokenizer, no raw-character heuristics:
   node-groups. Error-tolerant; partial AST is used; only a wholly unusable parse
   errors out.
 
+Each entry in the table is tagged with `nodeFlags` (Code, LineComment, or
+BlockComment), allowing node-groups to distinguish between code and specific
+comment types while residing in a single, non-redundant data structure.
+
 `type astMap struct { … }` holds both tables (flat, sorted, binary-searchable).
 Methods used by the engine:
-  - `endsForStart(pos) []int` — candidate AST node ends starting exactly at
-    `pos` (tried largest-first at the call site).
+  - `endsForStartKind(pos, kind) []int` — candidate AST node ends starting
+    exactly at `pos` with matching kind (tried largest-first).
   - `significant(i) bool` — byte `i` lies inside a significant token.
-  - `nextSignificant(pos) int` — advance over insignificant debris.
+  - `nextSignificant(pos) int` — advance over insignificant debris (WS + comments).
+  - `nextNonCommentWhitespace(pos) int` — advance over raw whitespace only (retains comments).
   - `gapBoundary(L, R int) bool` — the gap invariant (below).
 
-Unexported; never surfaced through the public API.
+---
+
+### 2a. Comment node-groups
+
+Patterns can target specific comment types using the `⦅ // … ⦆` and `⦅ /* … */ ⦆`
+syntax. These are **strict lexical matches**:
+
+1. **One-to-one mapping**: Each comment node-group must match exactly one
+   comment as identified by the Go parser. It cannot span multiple comments
+   or match a subset of a single comment.
+2. **Kind isolation**: A line comment group (`//`) will never match a block
+   comment (`/* */`) and vice versa.
+3. **Context-aware snapping**: While code node-groups skip whitespace and
+   comments to find the next token, comment node-groups **snap to row whitespace
+   only**. This prevents a comment match from accidentally "consuming" adjacent
+   code tokens due to boundary alignment.
+4. **Internal whitespace**: Insignificant whitespace *inside* the comment guards
+   (e.g. between `//` and the first word) is handled via the Token-Stream 
+   Boundary Rule, allowing `⦅ // TODO ⦆` to match `//    TODO`.
+
+---
 
 ### 3. The gap rule as a native instruction — the Token-Stream Boundary Rule
 
@@ -258,19 +292,19 @@ insignificant bytes and checks `pos < job.nodeEnd`. (Legal: the job owns `pos`.)
 
 ### 4. Extend `backtrack.go`
 
-- `InstNodeGroup` at `pos`: `ends := astMap.endsForStart(pos)`; empty ⇒ branch
-  dies. Else push one job per `end` (largest-first), `pc = inst.Arg`,
-  `nodeEnd = end`.
-- `InstNodeExit`: succeed iff `nextSignificant(pos) == job.nodeEnd`; then continue
-  at `inst.Out` with the parent frame (already on the stack).
+- `InstNodeGroup` at `pos`: `ends := astMap.endsForStartKind(pos, inst.Arg)`; 
+  empty ⇒ branch dies. Else push one job per `end` (largest-first), 
+  `pc = inst.Sub`, `nodeEnd = end`, `isComment = (kind != NodeCode)`.
+- `InstNodeExit`: succeed iff `snap(pos) == job.nodeEnd`; then continue
+  at `inst.Out` with the parent frame (already on the stack). `snap` is 
+  `nextSignificant` for code and `nextNonCommentWhitespace` for comments.
 - `InstGap`: as in §3.
 - `shouldVisit(pc,pos)` collides with node bounds (same `(pc,pos)` under
   different `nodeEnd`). Inside node regions, **disable the visited prune** and
   rely on the fixed, properly-nested AST bounds plus a **step cap** for
   termination — exactly the POC's proven model. Plain-region pruning is
   unchanged.
-- Add `nodeEnd int32` to `job` (and a `skip` discriminator if needed). No
-  heap-per-fork.
+- Add `nodeEnd int32` and `isComment bool` to `job`. No heap-per-fork.
 
 ### 5. Dispatch + `input` seam (`exec.go`, `regexp.go`)
 
@@ -338,7 +372,7 @@ new API, and **no** upstream test regresses.
 2. **Fork `syntax`.** Re-point the import to local `syntax`; add `OpNodeGroup`,
    `OpGap`, `InstNodeGroup`, `InstNodeExit`, `InstGap`, `Prog.HasNodeGroup` as
    inert additions. *Gate: `syntax` + `regexp` suites green.*
-3. **Parser.** `⦃ … ⦄` and in-node whitespace produce `OpNodeGroup`/`OpGap`;
+3. **Parser.** `⦅ … ⦆` and in-node whitespace produce `OpNodeGroup`/`OpGap`;
    plain patterns parse identically. *Gate: stock suites green; AST dumps for new
    ops match expectations.*
 4. **Compiler.** Emit the new instructions; set `HasNodeGroup`; correct, real
