@@ -6,8 +6,6 @@ package regast
 
 import (
 	"bytes"
-	"internal/race"
-	"internal/testenv"
 	"mohabbat/mohabbat/regast/syntax"
 	"reflect"
 	"slices"
@@ -641,10 +639,10 @@ func BenchmarkFind(b *testing.B) {
 }
 
 func TestFindAllNoMatchAllocs(t *testing.T) {
-	if race.Enabled {
+	if raceEnabled {
 		t.Skip("The race detector randomly drops pooled objects.")
 	}
-	if testenv.OptimizationOff() {
+	if optimizationOff {
 		t.Skip("skipping test with optimizations disabled")
 	}
 	re := MustCompile("a+b+")
