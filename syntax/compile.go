@@ -124,6 +124,23 @@ func (c *compiler) compile(re *Regexp) frag {
 		return c.empty(EmptyWordBoundary)
 	case OpNoWordBoundary:
 		return c.empty(EmptyNoWordBoundary)
+	case OpBeginWord:
+		return c.empty(EmptyBeginWord)
+	case OpEndWord:
+		return c.empty(EmptyEndWord)
+	case OpBackref:
+		f := c.inst(InstBackref)
+		c.p.HasBackref = true
+		c.p.BackrefMask |= 1 << re.Cap
+		c.p.Inst[f.i].Arg = uint32(re.Cap)
+		if re.Flags&FoldCase != 0 {
+			c.p.Inst[f.i].Arg |= 1 << 31
+		}
+		if c.p.NumCap < 2*re.Cap+2 {
+			c.p.NumCap = 2*re.Cap + 2
+		}
+		f.out = makePatchList(f.i << 1)
+		return f
 	case OpCapture:
 		bra := c.cap(uint32(re.Cap << 1))
 		sub := c.compile(re.Sub[0])

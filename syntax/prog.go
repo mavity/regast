@@ -20,6 +20,8 @@ type Prog struct {
 	Start        int  // index of start instruction
 	NumCap       int  // number of InstCapture insts in re
 	HasNodeGroup bool // true if the program contains regast node-group instructions
+	HasBackref   bool // true if the program contains backreference instructions
+	BackrefMask  uint16
 }
 
 // An InstOp is an instruction opcode.
@@ -40,6 +42,7 @@ const (
 	InstNodeGroup
 	InstNodeExit
 	InstGap
+	InstBackref
 )
 
 var instOpNames = []string{
@@ -57,6 +60,7 @@ var instOpNames = []string{
 	"InstNodeGroup",
 	"InstNodeExit",
 	"InstGap",
+	"InstBackref",
 }
 
 func (i InstOp) String() string {
@@ -76,6 +80,8 @@ const (
 	EmptyEndText
 	EmptyWordBoundary
 	EmptyNoWordBoundary
+	EmptyBeginWord
+	EmptyEndWord
 )
 
 // EmptyOpContext returns the zero-width assertions
@@ -105,6 +111,12 @@ func EmptyOpContext(r1, r2 rune) EmptyOp {
 	}
 	if boundary != 0 { // IsWordChar(r1) != IsWordChar(r2)
 		op ^= (EmptyWordBoundary | EmptyNoWordBoundary)
+	}
+	if !IsWordChar(r1) && IsWordChar(r2) {
+		op |= EmptyBeginWord
+	}
+	if IsWordChar(r1) && !IsWordChar(r2) {
+		op |= EmptyEndWord
 	}
 	return op
 }
@@ -271,21 +283,15 @@ func (i *Inst) MatchRunePos(r rune) int {
 // an empty string between the runes before and after.
 // It should only be called when i.Op == [InstEmptyWidth].
 func (i *Inst) MatchEmptyWidth(before rune, after rune) bool {
-	switch EmptyOp(i.Arg) {
-	case EmptyBeginLine:
-		return before == '\n' || before == -1
-	case EmptyEndLine:
-		return after == '\n' || after == -1
-	case EmptyBeginText:
-		return before == -1
-	case EmptyEndText:
-		return after == -1
-	case EmptyWordBoundary:
-		return IsWordChar(before) != IsWordChar(after)
-	case EmptyNoWordBoundary:
-		return IsWordChar(before) == IsWordChar(after)
-	}
-	panic("unknown empty width arg")
+	op := EmptyOp(i.Arg)
+	return (op&EmptyBeginLine == 0 || before == '\n' || before == -1) &&
+		(op&EmptyEndLine == 0 || after == '\n' || after == -1) &&
+		(op&EmptyBeginText == 0 || before == -1) &&
+		(op&EmptyEndText == 0 || after == -1) &&
+		(op&EmptyWordBoundary == 0 || IsWordChar(before) != IsWordChar(after)) &&
+		(op&EmptyNoWordBoundary == 0 || IsWordChar(before) == IsWordChar(after)) &&
+		(op&EmptyBeginWord == 0 || !IsWordChar(before) && IsWordChar(after)) &&
+		(op&EmptyEndWord == 0 || IsWordChar(before) && !IsWordChar(after))
 }
 
 func (i *Inst) String() string {
@@ -358,5 +364,11 @@ func dumpInst(b *strings.Builder, i *Inst) {
 		bw(b, "nodeexit -> ", u32(i.Out))
 	case InstGap:
 		bw(b, "gap -> ", u32(i.Out))
+	case InstBackref:
+		bw(b, "backref ", u32(i.Arg&0x7fffffff))
+		if i.Arg&(1<<31) != 0 {
+			bw(b, "/i")
+		}
+		bw(b, " -> ", u32(i.Out))
 	}
 }

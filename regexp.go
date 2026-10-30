@@ -10,12 +10,11 @@
 // https://golang.org/s/re2syntax, except for \C.
 // For an overview of the syntax, see the [regast/syntax] package.
 //
-// The regast implementation provided by this package is
-// guaranteed to run in time linear in the size of the input.
-// (This is a property not guaranteed by most open source
-// implementations of regular expressions.) For more information
-// about this property, see https://swtch.com/~rsc/regexp/regexp1.html
-// or any book about automata theory.
+// Plain RE2-compatible patterns are guaranteed to run in time linear in the
+// size of the input. Extensions that require backtracking, including node-groups
+// and the opt-in backreference syntax accepted by [CompileWithFlags], can
+// require superlinear work. Use the Try methods to set an explicit work limit
+// for backreference searches.
 //
 // String matching uses UTF-8-encoded code points. Byte matching decodes valid
 // UTF-8 code points and represents each invalid byte with a distinct internal
@@ -62,6 +61,7 @@ package regast
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"iter"
 	"mohabbat/mohabbat/regast/syntax"
@@ -137,6 +137,18 @@ func CompileBytes(pattern []byte) (*Regexp, error) {
 	return compileBytes(pattern, syntax.Perl, false)
 }
 
+// CompileWithFlags parses and compiles expr using flags that control syntax
+// extensions such as backreferences.
+func CompileWithFlags(expr string, flags syntax.Flags) (*Regexp, error) {
+	return compile(expr, flags, false)
+}
+
+// CompileBytesWithFlags is like CompileWithFlags but preserves invalid UTF-8
+// bytes in the pattern as distinct symbols.
+func CompileBytesWithFlags(pattern []byte, flags syntax.Flags) (*Regexp, error) {
+	return compileBytes(pattern, flags, false)
+}
+
 // CompilePOSIX is like [Compile] but restricts the regular expression
 // to POSIX ERE (egrep) syntax and changes the match semantics to
 // leftmost-longest.
@@ -209,6 +221,9 @@ func compileParsed(expr string, longest bool, re *syntax.Regexp) (*Regexp, error
 	if err != nil {
 		return nil, err
 	}
+	if prog.HasNodeGroup && prog.HasBackref {
+		return nil, &syntax.Error{Code: syntax.ErrBackrefNodeGroup, Expr: expr}
+	}
 	matchcap := prog.NumCap
 	if matchcap < 2 {
 		matchcap = 2
@@ -226,7 +241,7 @@ func compileParsed(expr string, longest bool, re *syntax.Regexp) (*Regexp, error
 	}
 	// Node-group programs contain instructions the one-pass engine does not
 	// understand; they always run on the bitstate backtracker.
-	if !prog.HasNodeGroup {
+	if !prog.HasNodeGroup && !prog.HasBackref {
 		regexp.onepass = compileOnePass(prog)
 	}
 	if regexp.onepass == nil {
@@ -306,6 +321,8 @@ func minInputLen(re *syntax.Regexp) int {
 	switch re.Op {
 	default:
 		return 0
+	case syntax.OpBackref:
+		return 0
 	case syntax.OpAnyChar, syntax.OpAnyCharNotNL, syntax.OpCharClass:
 		return 1
 	case syntax.OpLiteral:
@@ -340,6 +357,14 @@ func minInputLen(re *syntax.Regexp) int {
 		return l
 	}
 }
+
+// ErrStepLimit reports that a backreference search exceeded its caller-provided
+// work limit.
+var ErrStepLimit = errors.New("regast: backreference search step limit exceeded")
+
+// ErrBackrefReader reports that a backreference expression cannot search an
+// io.RuneReader because captured byte spans must be reread.
+var ErrBackrefReader = errors.New("regast: backreferences require buffered input")
 
 // MustCompile is like [Compile] but panics if the expression cannot be parsed.
 // It simplifies safe initialization of global variables holding compiled regular
@@ -630,6 +655,11 @@ func (re *Regexp) ReplaceAllStringFunc(src string, repl func(string) string) str
 }
 
 func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst []byte, m []int) []byte) []byte {
+	out, _ := re.replaceAllWithLimit(bsrc, src, nmatch, 0, repl)
+	return out
+}
+
+func (re *Regexp) replaceAllWithLimit(bsrc []byte, src string, nmatch int, maxSteps int, repl func(dst []byte, m []int) []byte) ([]byte, error) {
 	lastMatchEnd := 0 // end position of the most recent match
 	searchPos := 0    // position where we next look for a match
 	var buf []byte
@@ -645,8 +675,12 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 	}
 
 	var dstCap [2]int
+	budget := &stepBudget{maxSteps: maxSteps}
 	for searchPos <= endPos {
-		a := re.find(am, nil, bsrc, src, searchPos, nmatch, dstCap[:0])
+		a, err := re.findWithBudget(am, nil, bsrc, src, searchPos, nmatch, dstCap[:0], budget)
+		if err != nil {
+			return nil, err
+		}
 		if len(a) == 0 {
 			break // no more matches
 		}
@@ -692,7 +726,7 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 		buf = append(buf, src[lastMatchEnd:]...)
 	}
 
-	return buf
+	return buf, nil
 }
 
 // ReplaceAll returns a copy of src, replacing matches of the [Regexp]
@@ -703,6 +737,7 @@ func (re *Regexp) ReplaceAll(src, repl []byte) []byte {
 	if bytes.IndexByte(repl, '$') >= 0 {
 		n = 2 * (re.numSubexp + 1)
 	}
+
 	srepl := ""
 	b := re.replaceAll(src, "", n, func(dst []byte, match []int) []byte {
 		if len(srepl) != len(repl) {
@@ -711,6 +746,23 @@ func (re *Regexp) ReplaceAll(src, repl []byte) []byte {
 		return re.expand(dst, srepl, src, "", match)
 	})
 	return b
+}
+
+// TryReplaceAll replaces matches in src, returning ErrStepLimit instead of a
+// partial result when a backreference search exceeds maxSteps. A non-positive
+// maxSteps disables the work limit.
+func (re *Regexp) TryReplaceAll(src, repl []byte, maxSteps int) ([]byte, error) {
+	n := 2
+	if bytes.IndexByte(repl, '$') >= 0 {
+		n = 2 * (re.numSubexp + 1)
+	}
+	srepl := ""
+	return re.replaceAllWithLimit(src, "", n, maxSteps, func(dst []byte, match []int) []byte {
+		if len(srepl) != len(repl) {
+			srepl = string(repl)
+		}
+		return re.expand(dst, srepl, src, "", match)
+	})
 }
 
 // ReplaceAllLiteral returns a copy of src, replacing matches of the [Regexp]
@@ -886,6 +938,25 @@ func (re *Regexp) FindIndex(b []byte) (m []int) {
 		return nil
 	}
 	return m[0:2]
+}
+
+// TryFindSubmatchIndex finds the leftmost match and its submatch indexes,
+// returning ErrStepLimit if a backreference search exceeds maxSteps. A
+// non-positive maxSteps disables the work limit.
+func (re *Regexp) TryFindSubmatchIndex(b []byte, maxSteps int) ([]int, error) {
+	m, err := re.findWithLimit(re.astMapFor(b, ""), nil, b, "", 0, re.prog.NumCap, nil, maxSteps)
+	if err != nil || m == nil {
+		return nil, err
+	}
+	return re.pad(m), nil
+}
+
+// TryMatch reports whether b contains a match, returning ErrStepLimit if a
+// backreference search exceeds maxSteps. A non-positive maxSteps disables the
+// work limit.
+func (re *Regexp) TryMatch(b []byte, maxSteps int) (bool, error) {
+	m, err := re.findWithLimit(re.astMapFor(b, ""), nil, b, "", 0, 0, nil, maxSteps)
+	return m != nil, err
 }
 
 // FindStringIndex returns the location of the leftmost match for re in s.

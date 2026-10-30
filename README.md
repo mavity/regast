@@ -1,6 +1,6 @@
 # regast — node-aware `regexp`, natively integrated
 
-`regast` is a drop-in replacement for the Go standard library's `regexp` package that adds **AST node-group** support. It allows you to write regular expressions that understand Go code structure, ignoring insignificant whitespace and comments while honoring lexical token boundaries.
+`regast` is a drop-in replacement for the Go standard library's `regexp` package that adds **AST node-group** support and opt-in backreferences. Node-groups let patterns understand Go code structure, ignoring insignificant whitespace and comments while honoring lexical token boundaries.
 
 ## Casual Examples
 
@@ -46,6 +46,39 @@ out := re.ReplaceAllString(src, `check($1)`)
 re := regast.MustCompile(`⦅ // TODO: (\w+)⦆`)
 out := re.ReplaceAllString(src, `// FIXED($2)`)
 ```
+
+## Opt-in Backreferences
+
+Backreferences and GNU word-start/end assertions are available through the
+forked syntax package's `Backref` flag:
+
+```go
+import (
+    "mohabbat/mohabbat/regast"
+    "mohabbat/mohabbat/regast/syntax"
+)
+
+re, err := regast.CompileWithFlags(`([[:alpha:]]+)-\1`, syntax.Perl|syntax.Backref)
+if err != nil {
+    // Handle invalid patterns, including references beyond the final capture.
+}
+```
+
+`Compile` retains the standard RE2-compatible syntax; `\1` through `\9`, `\<`,
+and `\>` are enabled only with `syntax.Backref`. `\10` means backreference `\1`
+followed by literal `0`. A valid reference to a capture that has not yet been
+closed or did not participate in the match fails at runtime. Backreferences
+cannot be combined with AST node-groups, and reader-based matching methods do
+not support backreference patterns; use buffered string or byte inputs.
+
+Backreference matching may require superlinear work. The ordinary `Find*`,
+`Match*`, and replacement methods run without a work limit; callers that need a
+bound can use `TryFindSubmatchIndex` or `TryMatch`. `TryReplaceAll` applies its
+`maxSteps` budget across the complete replacement operation. A non-positive
+limit disables the cap, and exhaustion returns `regast.ErrStepLimit` rather
+than a partial result. Case-insensitive backreferences use Unicode simple-fold
+equivalence for valid UTF-8; invalid bytes in byte-mode input only match the
+same invalid byte.
 
 ## Running Tests
 
@@ -404,4 +437,3 @@ new API, and **no** upstream test regresses.
   suite is the regression wall (additions only).
 - **Termination inside node regions** relies on fixed AST bounds + step cap
   rather than the `(pc,pos)` visited prune; the cap must be generous but finite.
-

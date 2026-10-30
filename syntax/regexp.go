@@ -71,6 +71,9 @@ const (
 	OpAlternate                    // matches alternation of Subs
 	OpNodeGroup                    // matches a whole Go AST node (regast extension)
 	OpGap                          // matches a required structural delimiter (regast extension)
+	OpBackref                      // matches the previously captured text for Cap
+	OpBeginWord                    // matches empty string at beginning of a word
+	OpEndWord                      // matches empty string at end of a word
 )
 
 const opPseudo Op = 128 // where pseudo-ops start
@@ -108,6 +111,11 @@ func (x *Regexp) Equal(y *Regexp) bool {
 
 	case OpCapture:
 		if x.Cap != y.Cap || x.Name != y.Name || !x.Sub[0].Equal(y.Sub[0]) {
+			return false
+		}
+
+	case OpBackref:
+		if x.Cap != y.Cap || x.Flags&FoldCase != y.Flags&FoldCase {
 			return false
 		}
 	}
@@ -160,6 +168,12 @@ func calcFlags(re *Regexp, flags *map[*Regexp]printFlags) (must, cant printFlags
 			}
 		}
 		return 0, 0
+
+	case OpBackref:
+		if re.Flags&FoldCase != 0 {
+			return flagI, 0
+		}
+		return 0, flagI
 
 	case OpCharClass:
 		// If literal is fold-sensitive, return 0, flagI - (?i) has been compiled out.
@@ -347,6 +361,10 @@ func writeRegexp(b *strings.Builder, re *Regexp, f printFlags, flags map[*Regexp
 		b.WriteString(`\b`)
 	case OpNoWordBoundary:
 		b.WriteString(`\B`)
+	case OpBeginWord:
+		b.WriteString(`\<`)
+	case OpEndWord:
+		b.WriteString(`\>`)
 	case OpCapture:
 		if re.Name != "" {
 			b.WriteString(`(?P<`)
@@ -359,10 +377,14 @@ func writeRegexp(b *strings.Builder, re *Regexp, f printFlags, flags map[*Regexp
 			writeRegexp(b, re.Sub[0], flags[re.Sub[0]], flags)
 		}
 		b.WriteRune(')')
+	case OpBackref:
+		b.WriteRune('\\')
+		b.WriteString(strconv.Itoa(re.Cap))
 	case OpStar, OpPlus, OpQuest, OpRepeat:
 		p := printFlags(0)
 		sub := re.Sub[0]
-		if sub.Op > OpCapture || sub.Op == OpLiteral && len(sub.Rune) > 1 {
+		if (sub.Op > OpCapture && sub.Op != OpBackref && sub.Op != OpBeginWord && sub.Op != OpEndWord) ||
+			sub.Op == OpLiteral && len(sub.Rune) > 1 {
 			p = flagPrec
 		}
 		writeRegexp(b, sub, p, flags)
@@ -472,6 +494,20 @@ func (re *Regexp) MaxCap() int {
 	}
 	for _, sub := range re.Sub {
 		if n := sub.MaxCap(); m < n {
+			m = n
+		}
+	}
+	return m
+}
+
+// MaxBackref walks the regexp to find the largest referenced capture index.
+func (re *Regexp) MaxBackref() int {
+	m := 0
+	if re.Op == OpBackref {
+		m = re.Cap
+	}
+	for _, sub := range re.Sub {
+		if n := sub.MaxBackref(); m < n {
 			m = n
 		}
 	}

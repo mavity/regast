@@ -166,6 +166,18 @@ func (f lazyFlag) match(op syntax.EmptyOp) bool {
 	} else {
 		op &^= syntax.EmptyNoWordBoundary
 	}
+	if op&syntax.EmptyBeginWord != 0 {
+		if syntax.IsWordChar(r1) || !syntax.IsWordChar(r2) {
+			return false
+		}
+		op &^= syntax.EmptyBeginWord
+	}
+	if op&syntax.EmptyEndWord != 0 {
+		if !syntax.IsWordChar(r1) || syntax.IsWordChar(r2) {
+			return false
+		}
+		op &^= syntax.EmptyEndWord
+	}
 	return op == 0
 }
 
@@ -519,9 +531,25 @@ func (re *Regexp) doMatch(r io.RuneReader, b []byte, s string) bool {
 //
 // nil is returned if no matches are found and non-nil if matches are found.
 func (re *Regexp) find(am *astMap, r io.RuneReader, b []byte, s string, pos int, ncap int, dstCap []int) []int {
+	m, _ := re.findWithLimit(am, r, b, s, pos, ncap, dstCap, 0)
+	return m
+}
+
+func (re *Regexp) findWithLimit(am *astMap, r io.RuneReader, b []byte, s string, pos int, ncap int, dstCap []int, maxSteps int) ([]int, error) {
+	return re.findWithBudget(am, r, b, s, pos, ncap, dstCap, &stepBudget{maxSteps: maxSteps})
+}
+
+func (re *Regexp) findWithBudget(am *astMap, r io.RuneReader, b []byte, s string, pos int, ncap int, dstCap []int, budget *stepBudget) ([]int, error) {
 	if dstCap == nil {
 		// Make sure 'return dstCap' is non-nil.
 		dstCap = arrayNoInts[:0:0]
+	}
+
+	if re.prog.HasBackref {
+		if r != nil || am != nil {
+			return nil, ErrBackrefReader
+		}
+		return re.backtrackWithBudget(nil, b, s, pos, ncap, dstCap, budget)
 	}
 
 	if re.prog.HasNodeGroup {
@@ -529,20 +557,22 @@ func (re *Regexp) find(am *astMap, r io.RuneReader, b []byte, s string, pos int,
 		// unsupported. They always run on the (extended) bitstate backtracker,
 		// regardless of the usual size cap.
 		if r != nil || am == nil {
-			return nil
+			return nil, nil
 		}
-		return re.backtrack(am, b, s, pos, ncap, dstCap)
+		m, err := re.backtrackWithBudget(am, b, s, pos, ncap, dstCap, budget)
+		return m, err
 	}
 
 	if r == nil && len(b)+len(s) < re.minInputLen {
-		return nil
+		return nil, nil
 	}
 
 	if re.onepass != nil {
-		return re.doOnePass(r, b, s, pos, ncap, dstCap)
+		return re.doOnePass(r, b, s, pos, ncap, dstCap), nil
 	}
 	if r == nil && len(b)+len(s) < re.maxBitStateLen {
-		return re.backtrack(nil, b, s, pos, ncap, dstCap)
+		m, err := re.backtrackWithBudget(nil, b, s, pos, ncap, dstCap, budget)
+		return m, err
 	}
 
 	m := re.get()
@@ -551,12 +581,12 @@ func (re *Regexp) find(am *astMap, r io.RuneReader, b []byte, s string, pos int,
 	m.init(ncap)
 	if !m.match(i, pos) {
 		re.put(m)
-		return nil
+		return nil, nil
 	}
 
 	dstCap = append(dstCap, m.matchcap...)
 	re.put(m)
-	return dstCap
+	return dstCap, nil
 }
 
 // arrayNoInts is returned by find match if nil dstCap is passed

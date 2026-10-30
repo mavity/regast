@@ -17,14 +17,37 @@ package regast
 import (
 	"mohabbat/mohabbat/regast/syntax"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 // A job is an entry on the backtracker's job stack. It holds
 // the instruction pc and the position in the input.
 type job struct {
-	pc  uint32
-	arg bool
-	pos int
+	pc        uint32
+	arg       bool
+	pos       int
+	undoStart int
+	undoEnd   int
+}
+
+type backrefCapture struct {
+	start, end, open int
+}
+
+type backrefCaptureKey struct {
+	groups [9]backrefCapture
+}
+
+type backrefVisitKey struct {
+	pc        uint32
+	pos       int
+	captureID uint32
+}
+
+type stepBudget struct {
+	maxSteps int
+	used     int
 }
 
 type nodeJob struct {
@@ -162,18 +185,24 @@ type nodeVisitKey struct {
 type bitState struct {
 	end      int
 	cap      []int
+	open     []int
 	matchcap []int
+	ncap     int
 	jobs     []job
 	nodeJobs []nodeJob
 	visited  []uint32
 
 	// regast node-group extension:
-	am          *astMap                   // structural map of the input (nil for plain matching)
-	frames      []nodeFrame               // per-search arena of node-bound frames
-	frameIntern map[uint64]int32          // canonicalize {end,parent} -> frame index
-	nodeVisited map[nodeVisitKey]struct{} // dedup of node-region states (replaces the bitvector there)
-	steps       int                       // per-start work counter
-	maxSteps    int                       // per-start backstop against adversarial exponential nesting
+	am             *astMap                   // structural map of the input (nil for plain matching)
+	frames         []nodeFrame               // per-search arena of node-bound frames
+	frameIntern    map[uint64]int32          // canonicalize {end,parent} -> frame index
+	nodeVisited    map[nodeVisitKey]struct{} // dedup of node-region states (replaces the bitvector there)
+	steps          int                       // per-start work counter
+	maxSteps       int                       // per-start backstop against adversarial exponential nesting
+	limitExceeded  bool
+	backrefVisited map[backrefVisitKey]struct{}
+	captureStates  map[backrefCaptureKey]uint32
+	nextCaptureID  uint32
 
 	inputs inputs
 }
@@ -227,7 +256,7 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 		b.jobs = b.jobs[:0]
 	}
 
-	if prog.HasNodeGroup {
+	if prog.HasNodeGroup || prog.HasBackref {
 		b.visited = b.visited[:0]
 	} else {
 		visitedSize := (len(prog.Inst)*(end+1) + visitedBits - 1) / visitedBits
@@ -239,19 +268,39 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 		}
 	}
 
-	if cap(b.cap) < ncap {
-		b.cap = make([]int, ncap)
+	capSize := ncap
+	matchcapSize := ncap
+	if prog.HasBackref {
+		capSize = max(capSize, prog.NumCap)
+		matchcapSize = max(matchcapSize, 2)
+	}
+	b.ncap = ncap
+	if cap(b.cap) < capSize {
+		b.cap = make([]int, capSize)
 	} else {
-		b.cap = b.cap[:ncap]
+		b.cap = b.cap[:capSize]
 	}
 	for i := range b.cap {
 		b.cap[i] = -1
 	}
 
-	if cap(b.matchcap) < ncap {
-		b.matchcap = make([]int, ncap)
+	openSize := 0
+	if prog.HasBackref {
+		openSize = prog.NumCap / 2
+	}
+	if cap(b.open) < openSize {
+		b.open = make([]int, openSize)
 	} else {
-		b.matchcap = b.matchcap[:ncap]
+		b.open = b.open[:openSize]
+	}
+	for i := range b.open {
+		b.open[i] = -1
+	}
+
+	if cap(b.matchcap) < matchcapSize {
+		b.matchcap = make([]int, matchcapSize)
+	} else {
+		b.matchcap = b.matchcap[:matchcapSize]
 	}
 	for i := range b.matchcap {
 		b.matchcap[i] = -1
@@ -270,6 +319,20 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 			clear(b.nodeVisited)
 		}
 	}
+	if prog.HasBackref {
+		if b.backrefVisited == nil {
+			b.backrefVisited = make(map[backrefVisitKey]struct{})
+		} else {
+			clear(b.backrefVisited)
+		}
+		if b.captureStates == nil {
+			b.captureStates = make(map[backrefCaptureKey]uint32)
+		} else {
+			clear(b.captureStates)
+		}
+	}
+	b.steps = 0
+	b.limitExceeded = false
 }
 
 // shouldVisit reports whether the combination of (pc, pos) has not
@@ -281,6 +344,157 @@ func (b *bitState) shouldVisit(pc uint32, pos int) bool {
 	}
 	b.visited[n/visitedBits] |= 1 << (n & (visitedBits - 1))
 	return true
+}
+
+func (b *bitState) resetBackrefVisited() {
+	clear(b.backrefVisited)
+	clear(b.captureStates)
+	b.nextCaptureID = 0
+}
+
+func (b *bitState) shouldVisitBackref(prog *syntax.Prog, pc uint32, pos int) bool {
+	var state backrefCaptureKey
+	for group := 1; group <= 9; group++ {
+		if prog.BackrefMask&(1<<group) == 0 {
+			continue
+		}
+		start, end := 2*group, 2*group+1
+		if end < len(b.cap) {
+			state.groups[group-1].start = b.cap[start]
+			state.groups[group-1].end = b.cap[end]
+		} else {
+			state.groups[group-1].start = -1
+			state.groups[group-1].end = -1
+		}
+		if group < len(b.open) {
+			state.groups[group-1].open = b.open[group]
+		} else {
+			state.groups[group-1].open = -1
+		}
+	}
+	captureID, ok := b.captureStates[state]
+	if !ok {
+		b.nextCaptureID++
+		captureID = b.nextCaptureID
+		b.captureStates[state] = captureID
+	}
+	key := backrefVisitKey{pc: pc, pos: pos, captureID: captureID}
+	if _, ok := b.backrefVisited[key]; ok {
+		return false
+	}
+	b.backrefVisited[key] = struct{}{}
+	return true
+}
+
+func (b *bitState) charge(steps int) bool {
+	if b.maxSteps <= 0 {
+		return true
+	}
+	if steps < 0 || b.steps > b.maxSteps-steps {
+		b.limitExceeded = true
+		return false
+	}
+	b.steps += steps
+	return true
+}
+
+func (b *bitState) matchBackref(i input, capStart, capEnd, pos int, foldCase bool) (int, bool) {
+	if capStart < 0 || capEnd < capStart {
+		return pos, false
+	}
+	switch subject := i.(type) {
+	case *inputBytes:
+		if capEnd > len(subject.str) || pos < 0 || pos > len(subject.str) {
+			return pos, false
+		}
+		if !foldCase {
+			length := capEnd - capStart
+			if length > len(subject.str)-pos {
+				return pos, false
+			}
+			for j := 0; j < length; j++ {
+				if !b.charge(1) || subject.str[capStart+j] != subject.str[pos+j] {
+					return pos, false
+				}
+			}
+			return pos + length, true
+		}
+		return b.matchBackrefFoldedBytes(subject.str, capStart, capEnd, pos)
+
+	case *inputString:
+		if capEnd > len(subject.str) || pos < 0 || pos > len(subject.str) {
+			return pos, false
+		}
+		if !foldCase {
+			length := capEnd - capStart
+			if length > len(subject.str)-pos {
+				return pos, false
+			}
+			for j := 0; j < length; j++ {
+				if !b.charge(1) || subject.str[capStart+j] != subject.str[pos+j] {
+					return pos, false
+				}
+			}
+			return pos + length, true
+		}
+		return b.matchBackrefFoldedString(subject.str, capStart, capEnd, pos)
+	}
+	return pos, false
+}
+
+func (b *bitState) matchBackrefFoldedBytes(subject []byte, capStart, capEnd, pos int) (int, bool) {
+	for capStart < capEnd {
+		captured, capturedWidth := decodeByteRune(subject[capStart:capEnd])
+		if pos >= len(subject) {
+			return pos, false
+		}
+		current, currentWidth := decodeByteRune(subject[pos:])
+		if !b.charge(1) || !foldBackrefRuneEqual(captured, current) {
+			return pos, false
+		}
+		capStart += capturedWidth
+		pos += currentWidth
+	}
+	return pos, true
+}
+
+func (b *bitState) matchBackrefFoldedString(subject string, capStart, capEnd, pos int) (int, bool) {
+	for capStart < capEnd {
+		captured, capturedWidth := decodeBackrefStringRune(subject[capStart:capEnd])
+		if pos >= len(subject) {
+			return pos, false
+		}
+		current, currentWidth := decodeBackrefStringRune(subject[pos:])
+		if !b.charge(1) || !foldBackrefRuneEqual(captured, current) {
+			return pos, false
+		}
+		capStart += capturedWidth
+		pos += currentWidth
+	}
+	return pos, true
+}
+
+func decodeBackrefStringRune(s string) (rune, int) {
+	r, width := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && width == 1 {
+		return syntax.InvalidByteRuneBase + rune(s[0]), 1
+	}
+	return r, width
+}
+
+func foldBackrefRuneEqual(a, b rune) bool {
+	if syntax.IsInvalidByteRune(a) || syntax.IsInvalidByteRune(b) {
+		return a == b
+	}
+	if a == b {
+		return true
+	}
+	for r := unicode.SimpleFold(a); r != a; r = unicode.SimpleFold(r) {
+		if r == b {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldVisitNode reports whether a node-region state (pc, pos, exact bound
@@ -328,7 +542,14 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 }
 
 func (b *bitState) pushPlain(re *Regexp, pc uint32, pos int, arg bool) {
-	if re.prog.Inst[pc].Op != syntax.InstFail && (arg || b.shouldVisit(pc, pos)) {
+	visit := b.shouldVisit
+	if re.prog.HasBackref {
+		visit = nil
+	}
+	if re.prog.Inst[pc].Op == syntax.InstFail {
+		return
+	}
+	if arg || (visit != nil && visit(pc, pos)) || re.prog.HasBackref && b.shouldVisitBackref(re.prog, pc, pos) {
 		b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos})
 	}
 }
@@ -339,14 +560,21 @@ func (re *Regexp) tryBacktrackPlain(b *bitState, i input, pc uint32, pos int) bo
 	b.pushPlain(re, pc, pos, false)
 	for len(b.jobs) > 0 {
 		l := len(b.jobs) - 1
-		pc := b.jobs[l].pc
-		pos := b.jobs[l].pos
-		arg := b.jobs[l].arg
+		current := b.jobs[l]
+		pc := current.pc
+		pos := current.pos
+		arg := current.arg
 		b.jobs = b.jobs[:l]
+		if re.prog.HasBackref && !b.charge(1) {
+			return false
+		}
 
 		goto Skip
 	CheckAndLoop:
-		if !b.shouldVisit(pc, pos) {
+		if re.prog.HasBackref && !b.shouldVisitBackref(re.prog, pc, pos) {
+			continue
+		}
+		if !re.prog.HasBackref && !b.shouldVisit(pc, pos) {
 			continue
 		}
 	Skip:
@@ -410,14 +638,65 @@ func (re *Regexp) tryBacktrackPlain(b *bitState, i input, pc uint32, pos int) bo
 			pc = inst.Out
 			goto CheckAndLoop
 		case syntax.InstCapture:
+			if !re.prog.HasBackref {
+				if arg {
+					b.cap[inst.Arg] = pos
+					continue
+				}
+				if inst.Arg < uint32(len(b.cap)) {
+					b.pushPlain(re, pc, b.cap[inst.Arg], true)
+					b.cap[inst.Arg] = pos
+				}
+				pc = inst.Out
+				goto CheckAndLoop
+			}
+			slot := int(inst.Arg)
+			group := slot / 2
+			if slot >= len(b.cap) || group >= len(b.open) {
+				pc = inst.Out
+				goto CheckAndLoop
+			}
+			if slot&1 == 0 {
+				if arg {
+					b.open[group] = pos
+					continue
+				}
+				b.jobs = append(b.jobs, job{pc: pc, arg: true, pos: b.open[group]})
+				b.open[group] = pos
+				pc = inst.Out
+				goto CheckAndLoop
+			}
 			if arg {
-				b.cap[inst.Arg] = pos
+				b.open[group] = pos
+				b.cap[slot-1] = current.undoStart
+				b.cap[slot] = current.undoEnd
 				continue
 			}
-			if inst.Arg < uint32(len(b.cap)) {
-				b.pushPlain(re, pc, b.cap[inst.Arg], true)
-				b.cap[inst.Arg] = pos
+			start := b.open[group]
+			if start < 0 {
+				continue
 			}
+			b.jobs = append(b.jobs, job{
+				pc: pc, arg: true, pos: start,
+				undoStart: b.cap[slot-1], undoEnd: b.cap[slot],
+			})
+			b.cap[slot-1] = start
+			b.cap[slot] = pos
+			b.open[group] = -1
+			pc = inst.Out
+			goto CheckAndLoop
+
+		case syntax.InstBackref:
+			group := int(inst.Arg & 0x7fffffff)
+			startSlot, endSlot := 2*group, 2*group+1
+			if startSlot < 0 || endSlot >= len(b.cap) || group >= len(b.open) || b.open[group] >= 0 {
+				continue
+			}
+			nextPos, matched := b.matchBackref(i, b.cap[startSlot], b.cap[endSlot], pos, inst.Arg&(1<<31) != 0)
+			if !matched {
+				continue
+			}
+			pos = nextPos
 			pc = inst.Out
 			goto CheckAndLoop
 		case syntax.InstEmptyWidth:
@@ -431,7 +710,7 @@ func (re *Regexp) tryBacktrackPlain(b *bitState, i input, pc uint32, pos int) bo
 			pc = inst.Out
 			goto CheckAndLoop
 		case syntax.InstMatch:
-			if len(b.cap) == 0 {
+			if b.ncap == 0 {
 				return true
 			}
 			if len(b.cap) > 1 {
@@ -852,36 +1131,61 @@ func (re *Regexp) tryBacktrackNode(b *bitState, i input, pc uint32, pos int) boo
 
 // backtrack runs a backtracking search of prog on the input starting at pos.
 func (re *Regexp) backtrack(am *astMap, ib []byte, is string, pos int, ncap int, dstCap []int) []int {
+	m, _ := re.backtrackWithLimit(am, ib, is, pos, ncap, dstCap, 0)
+	return m
+}
+
+func (re *Regexp) backtrackWithLimit(am *astMap, ib []byte, is string, pos int, ncap int, dstCap []int, maxSteps int) ([]int, error) {
+	return re.backtrackWithBudget(am, ib, is, pos, ncap, dstCap, &stepBudget{maxSteps: maxSteps})
+}
+
+func (re *Regexp) backtrackWithBudget(am *astMap, ib []byte, is string, pos int, ncap int, dstCap []int, budget *stepBudget) ([]int, error) {
 	startCond := re.cond
 	if startCond == ^syntax.EmptyOp(0) { // impossible
-		return nil
+		return nil, nil
 	}
 	if startCond&syntax.EmptyBeginText != 0 && pos != 0 {
 		// Anchored match, past beginning of text.
-		return nil
+		return nil, nil
 	}
 
 	b := newBitState()
 	i, end := b.inputs.init(nil, ib, is)
 	b.reset(re.prog, end, ncap)
 	b.am = am
+	if re.prog.HasBackref {
+		b.maxSteps = budget.maxSteps
+		b.steps = budget.used
+	}
+	defer func() {
+		budget.used = b.steps
+		freeBitState(b)
+	}()
 	// The work cap applies only to node-group programs (plain matching is
 	// already bounded by the bitvector visited prune). Generous: realistic node
 	// patterns stay far under it; it only catches adversarial deep nesting.
-	if am != nil {
+	if am != nil && !re.prog.HasBackref {
 		b.maxSteps = 64*(end+1)*len(re.prog.Inst) + (1 << 20)
-	} else {
+	} else if !re.prog.HasBackref {
 		b.maxSteps = 0
 	}
 
 	// Anchored search must start at the beginning of the input
 	if startCond&syntax.EmptyBeginText != 0 {
+		if re.prog.HasBackref {
+			b.resetBackrefVisited()
+		}
 		if len(b.cap) > 0 {
 			b.cap[0] = pos
 		}
 		if !re.tryBacktrack(b, i, uint32(re.prog.Start), pos) {
-			freeBitState(b)
-			return nil
+			if b.limitExceeded {
+				for i := range b.matchcap {
+					b.matchcap[i] = -1
+				}
+				return nil, ErrStepLimit
+			}
+			return nil, nil
 		}
 	} else {
 
@@ -897,12 +1201,26 @@ func (re *Regexp) backtrack(am *astMap, ib []byte, is string, pos int, ncap int,
 				// Match requires literal prefix; fast search for it.
 				advance := i.index(re, pos)
 				if advance < 0 {
-					freeBitState(b)
-					return nil
+					if re.prog.HasBackref && !b.charge(end-pos) {
+						return nil, ErrStepLimit
+					}
+					return nil, nil
+				}
+				if re.prog.HasBackref && !b.charge(advance) {
+					return nil, ErrStepLimit
 				}
 				pos += advance
 			}
 
+			if re.prog.HasBackref {
+				b.resetBackrefVisited()
+				for i := range b.cap {
+					b.cap[i] = -1
+				}
+				for i := range b.open {
+					b.open[i] = -1
+				}
+			}
 			if len(b.cap) > 0 {
 				b.cap[0] = pos
 			}
@@ -910,14 +1228,18 @@ func (re *Regexp) backtrack(am *astMap, ib []byte, is string, pos int, ncap int,
 				// Match must be leftmost; done.
 				goto Match
 			}
+			if b.limitExceeded {
+				for i := range b.matchcap {
+					b.matchcap[i] = -1
+				}
+				return nil, ErrStepLimit
+			}
 			_, width = i.step(pos)
 		}
-		freeBitState(b)
-		return nil
+		return nil, nil
 	}
 
 Match:
-	dstCap = append(dstCap, b.matchcap...)
-	freeBitState(b)
-	return dstCap
+	dstCap = append(dstCap, b.matchcap[:min(ncap, len(b.matchcap))]...)
+	return dstCap, nil
 }

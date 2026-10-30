@@ -29,21 +29,24 @@ func _() {
 	_ = x[OpAlternate-19]
 	_ = x[OpNodeGroup-20]
 	_ = x[OpGap-21]
+	_ = x[OpBackref-22]
+	_ = x[OpBeginWord-23]
+	_ = x[OpEndWord-24]
 	_ = x[opPseudo-128]
 }
 
 const (
-	_Op_name_0 = "NoMatchEmptyMatchLiteralCharClassAnyCharNotNLAnyCharBeginLineEndLineBeginTextEndTextWordBoundaryNoWordBoundaryCaptureStarPlusQuestRepeatConcatAlternateNodeGroupGap"
+	_Op_name_0 = "NoMatchEmptyMatchLiteralCharClassAnyCharNotNLAnyCharBeginLineEndLineBeginTextEndTextWordBoundaryNoWordBoundaryCaptureStarPlusQuestRepeatConcatAlternateNodeGroupGapBackrefBeginWordEndWord"
 	_Op_name_1 = "opPseudo"
 )
 
 var (
-	_Op_index_0 = [...]uint8{0, 7, 17, 24, 33, 45, 52, 61, 68, 77, 84, 96, 110, 117, 121, 125, 130, 136, 142, 151, 160, 163}
+	_Op_index_0 = [...]uint8{0, 7, 17, 24, 33, 45, 52, 61, 68, 77, 84, 96, 110, 117, 121, 125, 130, 136, 142, 151, 160, 163, 170, 179, 186}
 )
 
 func (i Op) String() string {
 	switch {
-	case 1 <= i && i <= 21:
+	case 1 <= i && i <= 24:
 		i -= 1
 		return _Op_name_0[_Op_index_0[i]:_Op_index_0[i+1]]
 	case i == 128:

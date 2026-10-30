@@ -6,6 +6,7 @@ package syntax
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -35,6 +36,8 @@ const (
 	ErrInvalidCharRange      ErrorCode = "invalid character class range"
 	ErrInvalidEscape         ErrorCode = "invalid escape sequence"
 	ErrInvalidNamedCapture   ErrorCode = "invalid named capture"
+	ErrInvalidBackref        ErrorCode = "invalid backreference"
+	ErrBackrefNodeGroup      ErrorCode = "backreferences cannot be combined with node-groups"
 	ErrInvalidPerlOp         ErrorCode = "invalid or unsupported Perl syntax"
 	ErrInvalidRepeatOp       ErrorCode = "invalid nested repetition operator"
 	ErrInvalidRepeatSize     ErrorCode = "invalid repeat count"
@@ -68,6 +71,7 @@ const (
 	Simple                             // regast contains no counted repetition
 	NodeLineComment                    // node-group matches a // line comment
 	NodeBlockComment                   // node-group matches a /* */ block comment
+	Backref                            // allow GNU-style \1-\9 backreferences and \<, \>
 
 	MatchNL = ClassNL | DotNL
 
@@ -284,6 +288,8 @@ func (p *parser) calcSize(re *Regexp, force bool) int64 {
 	case OpCapture, OpStar:
 		// star can be 1+ or 2+; assume 2 pessimistically
 		size = 2 + p.calcSize(re.Sub[0], false)
+	case OpBackref:
+		size = 1
 	case OpPlus, OpQuest:
 		size = 1 + p.calcSize(re.Sub[0], false)
 	case OpConcat:
@@ -1159,6 +1165,25 @@ func parse(s string, flags Flags, allowInvalid bool) (_ *Regexp, err error) {
 			repeat = before
 			t = after
 		case '\\':
+			if p.flags&Backref != 0 && len(t) >= 2 {
+				switch {
+				case t[1] >= '1' && t[1] <= '9':
+					re := p.newRegexp(OpBackref)
+					re.Cap = int(t[1] - '0')
+					re.Flags = p.flags & FoldCase
+					p.push(re)
+					t = t[2:]
+					break BigSwitch
+				case t[1] == '<':
+					p.op(OpBeginWord)
+					t = t[2:]
+					break BigSwitch
+				case t[1] == '>':
+					p.op(OpEndWord)
+					t = t[2:]
+					break BigSwitch
+				}
+			}
 			if p.flags&PerlX != 0 && len(t) >= 2 {
 				switch t[1] {
 				case 'A':
@@ -1242,7 +1267,11 @@ func parse(s string, flags Flags, allowInvalid bool) (_ *Regexp, err error) {
 	if n != 1 {
 		return nil, &Error{ErrMissingParen, s}
 	}
-	return p.stack[0], nil
+	re := p.stack[0]
+	if cap := re.MaxBackref(); cap > p.numCap {
+		return nil, &Error{ErrInvalidBackref, "\\" + strconv.Itoa(cap)}
+	}
+	return re, nil
 }
 
 // parseRepeat parses {min} (max=min) or {min,} (max=-1) or {min,max}.
