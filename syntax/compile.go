@@ -83,8 +83,8 @@ func (c *compiler) init() {
 	c.inst(InstFail)
 }
 
-var anyRuneNotNL = []rune{0, '\n' - 1, '\n' + 1, unicode.MaxRune}
-var anyRune = []rune{0, unicode.MaxRune}
+var anyRuneNotNL = []rune{0, '\n' - 1, '\n' + 1, InvalidByteRuneMax}
+var anyRune = []rune{0, InvalidByteRuneMax}
 
 func (c *compiler) compile(re *Regexp) frag {
 	switch re.Op {
@@ -322,9 +322,9 @@ func (c *compiler) rune(r []rune, flags Flags) frag {
 	switch {
 	case flags&FoldCase == 0 && (len(r) == 1 || len(r) == 2 && r[0] == r[1]):
 		i.Op = InstRune1
-	case len(r) == 2 && r[0] == 0 && r[1] == unicode.MaxRune:
+	case len(r) == 2 && r[0] == 0 && r[1] == InvalidByteRuneMax:
 		i.Op = InstRuneAny
-	case len(r) == 4 && r[0] == 0 && r[1] == '\n'-1 && r[2] == '\n'+1 && r[3] == unicode.MaxRune:
+	case len(r) == 4 && r[0] == 0 && r[1] == '\n'-1 && r[2] == '\n'+1 && r[3] == InvalidByteRuneMax:
 		i.Op = InstRuneAnyNotNL
 	}
 

@@ -42,7 +42,7 @@ func (re *Regexp) Simplify() *Regexp {
 		// Special special case: x{0} matches the empty string
 		// and doesn't even need to consider x.
 		if re.Min == 0 && re.Max == 0 {
-			return &Regexp{Op: OpEmptyMatch}
+			return &Regexp{Op: OpEmptyMatch, allowInvalid: re.allowInvalid}
 		}
 
 		// The fun begins.
@@ -61,7 +61,7 @@ func (re *Regexp) Simplify() *Regexp {
 			}
 
 			// General case: x{4,} is xxxx+.
-			nre := &Regexp{Op: OpConcat}
+			nre := &Regexp{Op: OpConcat, allowInvalid: re.allowInvalid}
 			nre.Sub = nre.Sub0[:0]
 			for i := 0; i < re.Min-1; i++ {
 				nre.Sub = append(nre.Sub, sub)
@@ -84,7 +84,7 @@ func (re *Regexp) Simplify() *Regexp {
 		// Build leading prefix: xx.
 		var prefix *Regexp
 		if re.Min > 0 {
-			prefix = &Regexp{Op: OpConcat}
+			prefix = &Regexp{Op: OpConcat, allowInvalid: re.allowInvalid}
 			prefix.Sub = prefix.Sub0[:0]
 			for i := 0; i < re.Min; i++ {
 				prefix.Sub = append(prefix.Sub, sub)
@@ -95,7 +95,7 @@ func (re *Regexp) Simplify() *Regexp {
 		if re.Max > re.Min {
 			suffix := simplify1(OpQuest, re.Flags, sub, nil)
 			for i := re.Min + 1; i < re.Max; i++ {
-				nre2 := &Regexp{Op: OpConcat}
+				nre2 := &Regexp{Op: OpConcat, allowInvalid: re.allowInvalid}
 				nre2.Sub = append(nre2.Sub0[:0], sub, suffix)
 				suffix = simplify1(OpQuest, re.Flags, nre2, nil)
 			}
@@ -110,7 +110,7 @@ func (re *Regexp) Simplify() *Regexp {
 
 		// Some degenerate case like min > max or min < max < 0.
 		// Handle as impossible match.
-		return &Regexp{Op: OpNoMatch}
+		return &Regexp{Op: OpNoMatch, allowInvalid: re.allowInvalid}
 	}
 
 	return re

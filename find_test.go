@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // For each pattern/text pair, what is the expected output of each function?
@@ -24,6 +25,10 @@ type FindTest struct {
 
 func (t FindTest) String() string {
 	return fmt.Sprintf("pat: %#q text: %#q", t.pat, t.text)
+}
+
+func validUTF8ByteTest(test *FindTest) bool {
+	return utf8.ValidString(test.text)
 }
 
 var findTests = []FindTest{
@@ -166,6 +171,9 @@ func build(n int, x ...int) [][]int {
 
 func TestFind(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		re := MustCompile(test.pat)
 		if re.String() != test.pat {
 			t.Errorf("re.String() = %q, want %q", re.String(), test.pat)
@@ -236,6 +244,9 @@ func testFindIndex(test *FindTest, result []int, t *testing.T) {
 
 func TestFindIndex(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		testFindIndex(&test, MustCompile(test.pat).FindIndex([]byte(test.text)), t)
 	}
 }
@@ -256,6 +267,9 @@ func TestFindReaderIndex(t *testing.T) {
 
 func TestFindAll(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		result := MustCompile(test.pat).FindAll([]byte(test.text), test.max)
 		switch {
 		case test.matches == nil && result == nil:
@@ -331,6 +345,9 @@ func testFindAllIndex(test *FindTest, result [][]int, t *testing.T) {
 
 func TestFindAllIndex(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		testFindAllIndex(&test, MustCompile(test.pat).FindAllIndex([]byte(test.text), test.max), t)
 	}
 }
@@ -370,6 +387,9 @@ func testSubmatchBytes(test *FindTest, n int, submatches []int, result [][]byte,
 
 func TestFindSubmatch(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		result := MustCompile(test.pat).FindSubmatch([]byte(test.text))
 		switch {
 		case test.max == 0:
@@ -453,6 +473,9 @@ func testFindSubmatchIndex(test *FindTest, result []int, t *testing.T) {
 
 func TestFindSubmatchIndex(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		testFindSubmatchIndex(&test, MustCompile(test.pat).FindSubmatchIndex([]byte(test.text)), t)
 	}
 }
@@ -473,6 +496,9 @@ func TestFindReaderSubmatchIndex(t *testing.T) {
 
 func TestFindAllSubmatch(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		result := MustCompile(test.pat).FindAllSubmatch([]byte(test.text), test.max)
 		switch {
 		case test.matches == nil && result == nil:
@@ -530,6 +556,9 @@ func testFindAllSubmatchIndex(test *FindTest, result [][]int, t *testing.T) {
 
 func TestFindAllSubmatchIndex(t *testing.T) {
 	for _, test := range findTests {
+		if !validUTF8ByteTest(&test) {
+			continue
+		}
 		testFindAllSubmatchIndex(&test, MustCompile(test.pat).FindAllSubmatchIndex([]byte(test.text), test.max), t)
 	}
 }

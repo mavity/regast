@@ -151,7 +151,8 @@ const (
 // bitStateBlock is a dense, localized visited-bitset for a single 512-byte text
 // window. It holds 512*progLen bits, indexed by (offset-within-window, pc).
 type bitStateBlock struct {
-	bits []uint32
+	bits       []uint32
+	generation uint32
 }
 
 // nodeVisitKey uniquely identifies a node-region execution state for the
@@ -166,10 +167,11 @@ type nodeVisitKey struct {
 
 // bitState holds state for the backtracker.
 type bitState struct {
-	end      int
-	cap      []int
-	matchcap []int
-	jobs     []job
+	end        int
+	cap        []int
+	matchcap   []int
+	jobs       []job
+	generation uint32
 
 	// Page-table block matrix replacing the flat visited bitvector. blocks is a
 	// sparse index of 512-byte text pages; each page is backed by a dense
@@ -204,7 +206,30 @@ func newBitState() *bitState {
 func freeBitState(b *bitState) {
 	b.inputs.clear()
 	b.am = nil
+	if b.exceedsPageCacheLimit() {
+		clear(b.blocks[:cap(b.blocks)])
+		b.blocks = nil
+	}
 	bitStatePool.Put(b)
+}
+
+// Keep reusable page storage within the memory budget of the flat bit vector.
+func (b *bitState) exceedsPageCacheLimit() bool {
+	const maxWords = maxBacktrackVector / 32
+	const blockWords = 8 // Upper bound for the page-block header.
+	if cap(b.blocks) > maxWords/2 {
+		return true
+	}
+	words := cap(b.blocks) * 2 // Upper bound: two uint32 words per pointer.
+	for _, block := range b.blocks[:cap(b.blocks)] {
+		if block != nil {
+			if words > maxWords-blockWords || cap(block.bits) > maxWords-words-blockWords {
+				return true
+			}
+			words += cap(block.bits) + blockWords
+		}
+	}
+	return false
 }
 
 // maxBitStateLen returns the maximum length of a string to search with
@@ -245,13 +270,20 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 	b.wordsPerBlock = (bitsPerBlock + visitedBits - 1) / visitedBits
 
 	numBlocks := (end >> rowShift) + 1
+	if b.generation == ^uint32(0) {
+		for _, block := range b.blocks[:cap(b.blocks)] {
+			if block != nil {
+				block.generation = 0
+			}
+		}
+		b.generation = 1
+	} else {
+		b.generation++
+	}
 	if cap(b.blocks) < numBlocks {
 		b.blocks = make([]*bitStateBlock, numBlocks)
 	} else {
 		b.blocks = b.blocks[:numBlocks]
-		for i := range b.blocks {
-			b.blocks[i] = nil
-		}
 	}
 
 	if cap(b.cap) < ncap {
@@ -297,8 +329,19 @@ func (b *bitState) shouldVisit(pc uint32, pos int) bool {
 
 	block := b.blocks[blockIdx]
 	if block == nil {
-		block = &bitStateBlock{bits: make([]uint32, b.wordsPerBlock)}
+		block = &bitStateBlock{
+			bits:       make([]uint32, b.wordsPerBlock),
+			generation: b.generation,
+		}
 		b.blocks[blockIdx] = block
+	} else if block.generation != b.generation {
+		if cap(block.bits) < int(b.wordsPerBlock) {
+			block.bits = make([]uint32, b.wordsPerBlock)
+		} else {
+			block.bits = block.bits[:b.wordsPerBlock]
+			clear(block.bits)
+		}
+		block.generation = b.generation
 	}
 
 	bitIdx := offset*b.progLen + pc

@@ -183,6 +183,7 @@ const (
 
 type parser struct {
 	flags            Flags     // parse mode flags
+	allowInvalid     bool      // preserve invalid UTF-8 bytes as internal symbols
 	stack            []*Regexp // stack of parsed expressions
 	free             *Regexp
 	numCap           int // number of capturing groups seen
@@ -207,6 +208,7 @@ func (p *parser) newRegexp(op Op) *Regexp {
 		p.numRegexp++
 	}
 	re.Op = op
+	re.allowInvalid = p.allowInvalid
 	return re
 }
 
@@ -568,7 +570,7 @@ func (p *parser) alternate() *Regexp {
 	// Make sure top class is clean.
 	// All the others already are (see swapVerticalBar).
 	if len(subs) > 0 {
-		cleanAlt(subs[len(subs)-1])
+		cleanAlt(subs[len(subs)-1], p.allowInvalid)
 	}
 
 	// Empty alternate is special case
@@ -581,16 +583,20 @@ func (p *parser) alternate() *Regexp {
 }
 
 // cleanAlt cleans re for eventual inclusion in an alternation.
-func cleanAlt(re *Regexp) {
+func cleanAlt(re *Regexp, allowInvalid bool) {
 	switch re.Op {
 	case OpCharClass:
 		re.Rune = cleanClass(&re.Rune)
-		if len(re.Rune) == 2 && re.Rune[0] == 0 && re.Rune[1] == unicode.MaxRune {
+		maxRune := rune(unicode.MaxRune)
+		if allowInvalid {
+			maxRune = InvalidByteRuneMax
+		}
+		if len(re.Rune) == 2 && re.Rune[0] == 0 && re.Rune[1] == maxRune {
 			re.Rune = nil
 			re.Op = OpAnyChar
 			return
 		}
-		if len(re.Rune) == 4 && re.Rune[0] == 0 && re.Rune[1] == '\n'-1 && re.Rune[2] == '\n'+1 && re.Rune[3] == unicode.MaxRune {
+		if len(re.Rune) == 4 && re.Rune[0] == 0 && re.Rune[1] == '\n'-1 && re.Rune[2] == '\n'+1 && re.Rune[3] == maxRune {
 			re.Rune = nil
 			re.Op = OpAnyCharNotNL
 			return
@@ -808,7 +814,7 @@ func (p *parser) factor(sub []*Regexp) []*Regexp {
 				mergeCharClass(sub[start], sub[j])
 				p.reuse(sub[j])
 			}
-			cleanAlt(sub[start])
+			cleanAlt(sub[start], p.allowInvalid)
 			out = append(out, sub[start])
 		}
 
@@ -946,10 +952,17 @@ func literalRegexp(s string, flags Flags) *Regexp {
 // Flags, and returns a regular expression parse tree. The syntax is
 // described in the top-level comment.
 func Parse(s string, flags Flags) (*Regexp, error) {
-	return parse(s, flags)
+	return parse(s, flags, false)
 }
 
-func parse(s string, flags Flags) (_ *Regexp, err error) {
+// ParseBytes parses a byte-oriented regular expression. Invalid UTF-8 bytes
+// become distinct internal symbols in the range [InvalidByteRuneBase,
+// InvalidByteRuneMax].
+func ParseBytes(pattern []byte, flags Flags) (*Regexp, error) {
+	return parse(string(pattern), flags, true)
+}
+
+func parse(s string, flags Flags, allowInvalid bool) (_ *Regexp, err error) {
 	defer func() {
 		switch r := recover(); r {
 		default:
@@ -963,7 +976,7 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 		}
 	}()
 
-	if flags&Literal != 0 {
+	if flags&Literal != 0 && !allowInvalid {
 		// Trivial parser for literal string.
 		if err := checkUTF8(s); err != nil {
 			return nil, err
@@ -979,14 +992,29 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 		lastRepeat string
 	)
 	p.flags = flags
+	p.allowInvalid = allowInvalid
 	p.wholeRegexp = s
+	if flags&Literal != 0 {
+		re := p.newRegexp(OpLiteral)
+		re.Flags = flags
+		re.Rune = re.Rune0[:0]
+		for t := s; t != ""; {
+			c, rest, err := p.nextRune(t)
+			if err != nil {
+				return nil, err
+			}
+			re.Rune = append(re.Rune, c)
+			t = rest
+		}
+		return re, nil
+	}
 	t := s
 	for t != "" {
 		repeat := ""
 	BigSwitch:
 		switch t[0] {
 		default:
-			if c, t, err = nextRune(t); err != nil {
+			if c, t, err = p.nextRune(t); err != nil {
 				return nil, err
 			}
 			switch {
@@ -1153,7 +1181,7 @@ func parse(s string, flags Flags) (_ *Regexp, err error) {
 					var lit string
 					lit, t, _ = strings.Cut(t[2:], `\E`)
 					for lit != "" {
-						c, rest, err := nextRune(lit)
+						c, rest, err := p.nextRune(lit)
 						if err != nil {
 							return nil, err
 						}
@@ -1321,7 +1349,7 @@ func (p *parser) parsePerlFlags(s string) (rest string, err error) {
 	sawFlag := false
 Loop:
 	for t != "" {
-		if c, t, err = nextRune(t); err != nil {
+		if c, t, err = p.nextRune(t); err != nil {
 			return "", err
 		}
 		switch c {
@@ -1518,7 +1546,7 @@ func (p *parser) swapVerticalBar() bool {
 			if n >= 3 {
 				// Now out of reach.
 				// Clean opportunistically.
-				cleanAlt(p.stack[n-3])
+				cleanAlt(p.stack[n-3], p.allowInvalid)
 			}
 			p.stack[n-2] = re1
 			p.stack[n-1] = re2
@@ -1609,7 +1637,7 @@ func (p *parser) parseEscape(s string) (r rune, rest string, err error) {
 	if t == "" {
 		return 0, "", &Error{ErrTrailingBackslash, ""}
 	}
-	c, t, err := nextRune(t)
+	c, t, err := p.nextRune(t)
 	if err != nil {
 		return 0, "", err
 	}
@@ -1649,7 +1677,7 @@ Switch:
 		if t == "" {
 			break
 		}
-		if c, t, err = nextRune(t); err != nil {
+		if c, t, err = p.nextRune(t); err != nil {
 			return 0, "", err
 		}
 		if c == '{' {
@@ -1663,7 +1691,7 @@ Switch:
 				if t == "" {
 					break Switch
 				}
-				if c, t, err = nextRune(t); err != nil {
+				if c, t, err = p.nextRune(t); err != nil {
 					return 0, "", err
 				}
 				if c == '}' {
@@ -1673,13 +1701,16 @@ Switch:
 				if v < 0 {
 					break Switch
 				}
-				r = r*16 + v
-				if r > unicode.MaxRune {
+				if r > (InvalidByteRuneMax-v)/16 {
 					break Switch
 				}
+				r = r*16 + v
 				nhex++
 			}
 			if nhex == 0 {
+				break Switch
+			}
+			if r > unicode.MaxRune && (r < InvalidByteRuneBase || r > InvalidByteRuneMax) {
 				break Switch
 			}
 			return r, t, nil
@@ -1687,7 +1718,7 @@ Switch:
 
 		// Easy case: two hex digits.
 		x := unhex(c)
-		if c, t, err = nextRune(t); err != nil {
+		if c, t, err = p.nextRune(t); err != nil {
 			return 0, "", err
 		}
 		y := unhex(c)
@@ -1731,7 +1762,7 @@ func (p *parser) parseClassChar(s, wholeClass string) (r rune, rest string, err 
 		return p.parseEscape(s)
 	}
 
-	return nextRune(s)
+	return p.nextRune(s)
 }
 
 type charGroup struct {
@@ -1779,7 +1810,7 @@ func (p *parser) parseNamedClass(s string, r []rune) (out []rune, rest string, e
 func (p *parser) appendGroup(r []rune, g charGroup) []rune {
 	if p.flags&FoldCase == 0 {
 		if g.sign < 0 {
-			r = appendNegatedClass(r, g.class)
+			r = appendNegatedClass(r, g.class, p.allowInvalid)
 		} else {
 			r = appendClass(r, g.class)
 		}
@@ -1789,7 +1820,7 @@ func (p *parser) appendGroup(r []rune, g charGroup) []rune {
 		p.tmpClass = tmp
 		tmp = cleanClass(&p.tmpClass)
 		if g.sign < 0 {
-			r = appendNegatedClass(r, tmp)
+			r = appendNegatedClass(r, tmp, p.allowInvalid)
 		} else {
 			r = appendClass(r, tmp)
 		}
@@ -1930,7 +1961,7 @@ func (p *parser) parseUnicodeClass(s string, r []rune) (out []rune, rest string,
 		sign = -1
 	}
 	t := s[2:]
-	c, t, err := nextRune(t)
+	c, t, err := p.nextRune(t)
 	if err != nil {
 		return
 	}
@@ -1973,7 +2004,7 @@ func (p *parser) parseUnicodeClass(s string, r []rune) (out []rune, rest string,
 		if sign > 0 {
 			r = appendTable(r, tab)
 		} else {
-			r = appendNegatedTable(r, tab)
+			r = appendNegatedTable(r, tab, p.allowInvalid)
 		}
 	} else {
 		// Merge and clean tab and fold in a temporary buffer.
@@ -1987,7 +2018,7 @@ func (p *parser) parseUnicodeClass(s string, r []rune) (out []rune, rest string,
 		if sign > 0 {
 			r = appendClass(r, tmp)
 		} else {
-			r = appendNegatedClass(r, tmp)
+			r = appendNegatedClass(r, tmp, p.allowInvalid)
 		}
 	}
 	return r, t, nil
@@ -2082,7 +2113,7 @@ func (p *parser) parseClass(s string) (rest string, err error) {
 	re.Rune = class
 	class = cleanClass(&re.Rune)
 	if sign < 0 {
-		class = negateClass(class)
+		class = negateClass(class, p.allowInvalid)
 	}
 	re.Rune = class
 	p.push(re)
@@ -2231,7 +2262,7 @@ func appendFoldedClass(r []rune, x []rune) []rune {
 
 // appendNegatedClass returns the result of appending the negation of the class x to the class r.
 // It assumes x is clean.
-func appendNegatedClass(r []rune, x []rune) []rune {
+func appendNegatedClass(r []rune, x []rune, includeInvalid bool) []rune {
 	nextLo := '\u0000'
 	for i := 0; i < len(x); i += 2 {
 		lo, hi := x[i], x[i+1]
@@ -2240,8 +2271,12 @@ func appendNegatedClass(r []rune, x []rune) []rune {
 		}
 		nextLo = hi + 1
 	}
-	if nextLo <= unicode.MaxRune {
-		r = appendRange(r, nextLo, unicode.MaxRune)
+	maxRune := rune(unicode.MaxRune)
+	if includeInvalid {
+		maxRune = InvalidByteRuneMax
+	}
+	if nextLo <= maxRune {
+		r = appendRange(r, nextLo, maxRune)
 	}
 	return r
 }
@@ -2272,7 +2307,7 @@ func appendTable(r []rune, x *unicode.RangeTable) []rune {
 }
 
 // appendNegatedTable returns the result of appending the negation of x to the class r.
-func appendNegatedTable(r []rune, x *unicode.RangeTable) []rune {
+func appendNegatedTable(r []rune, x *unicode.RangeTable, includeInvalid bool) []rune {
 	nextLo := '\u0000' // lo end of next class to add
 	for _, xr := range x.R16 {
 		lo, hi, stride := rune(xr.Lo), rune(xr.Hi), rune(xr.Stride)
@@ -2306,15 +2341,19 @@ func appendNegatedTable(r []rune, x *unicode.RangeTable) []rune {
 			nextLo = c + 1
 		}
 	}
-	if nextLo <= unicode.MaxRune {
-		r = appendRange(r, nextLo, unicode.MaxRune)
+	maxRune := rune(unicode.MaxRune)
+	if includeInvalid {
+		maxRune = InvalidByteRuneMax
+	}
+	if nextLo <= maxRune {
+		r = appendRange(r, nextLo, maxRune)
 	}
 	return r
 }
 
 // negateClass overwrites r and returns r's negation.
 // It assumes the class r is already clean.
-func negateClass(r []rune) []rune {
+func negateClass(r []rune, includeInvalid bool) []rune {
 	nextLo := '\u0000' // lo end of next class to add
 	w := 0             // write index
 	for i := 0; i < len(r); i += 2 {
@@ -2327,10 +2366,14 @@ func negateClass(r []rune) []rune {
 		nextLo = hi + 1
 	}
 	r = r[:w]
-	if nextLo <= unicode.MaxRune {
+	maxRune := rune(unicode.MaxRune)
+	if includeInvalid {
+		maxRune = InvalidByteRuneMax
+	}
+	if nextLo <= maxRune {
 		// It's possible for the negation to have one more
 		// range - this one - than the original class, so use append.
-		r = append(r, nextLo, unicode.MaxRune)
+		r = append(r, nextLo, maxRune)
 	}
 	return r
 }
@@ -2372,9 +2415,12 @@ func checkUTF8(s string) error {
 	return nil
 }
 
-func nextRune(s string) (c rune, t string, err error) {
+func (p *parser) nextRune(s string) (c rune, t string, err error) {
 	c, size := utf8.DecodeRuneInString(s)
 	if c == utf8.RuneError && size == 1 {
+		if p.allowInvalid {
+			return InvalidByteRuneBase + rune(s[0]), s[1:], nil
+		}
 		return 0, "", &Error{Code: ErrInvalidUTF8, Expr: s}
 	}
 	return c, s[size:], nil

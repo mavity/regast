@@ -56,7 +56,7 @@ func onePassPrefix(p *syntax.Prog) (prefix string, complete bool, pc uint32) {
 
 	// Have prefix; gather characters.
 	var buf strings.Builder
-	for iop(i) == syntax.InstRune && len(i.Rune) == 1 && syntax.Flags(i.Arg)&syntax.FoldCase == 0 && i.Rune[0] != utf8.RuneError {
+	for iop(i) == syntax.InstRune && len(i.Rune) == 1 && syntax.Flags(i.Arg)&syntax.FoldCase == 0 && i.Rune[0] != utf8.RuneError && !syntax.IsInvalidByteRune(i.Rune[0]) {
 		buf.WriteRune(i.Rune[0])
 		pc, i = i.Out, &p.Inst[i.Out]
 	}
@@ -282,8 +282,8 @@ func onePassCopy(prog *syntax.Prog) *onePassProg {
 	return p
 }
 
-var anyRuneNotNL = []rune{0, '\n' - 1, '\n' + 1, unicode.MaxRune}
-var anyRune = []rune{0, unicode.MaxRune}
+var anyRuneNotNL = []rune{0, '\n' - 1, '\n' + 1, syntax.InvalidByteRuneMax}
+var anyRune = []rune{0, syntax.InvalidByteRuneMax}
 
 // makeOnePass creates a onepass Prog, if possible. It is possible if at any alt,
 // the match engine can always tell which branch to take. The routine may modify

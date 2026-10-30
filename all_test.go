@@ -93,10 +93,12 @@ func matchTest(t *testing.T, test *FindTest) {
 	if m != (len(test.matches) > 0) {
 		t.Errorf("MatchString failure on %s: %t should be %t", test, m, len(test.matches) > 0)
 	}
-	// now try bytes
-	m = re.Match([]byte(test.text))
-	if m != (len(test.matches) > 0) {
-		t.Errorf("Match failure on %s: %t should be %t", test, m, len(test.matches) > 0)
+	// Byte matching has distinct semantics for invalid UTF-8 input.
+	if utf8.ValidString(test.text) {
+		m = re.Match([]byte(test.text))
+		if m != (len(test.matches) > 0) {
+			t.Errorf("Match failure on %s: %t should be %t", test, m, len(test.matches) > 0)
+		}
 	}
 }
 
@@ -280,11 +282,12 @@ func TestReplaceAll(t *testing.T) {
 			t.Errorf("%q.ReplaceAllString(%q,%q) = %q; want %q",
 				tc.pattern, tc.input, tc.replacement, actual, tc.output)
 		}
-		// now try bytes
-		actual = string(re.ReplaceAll([]byte(tc.input), []byte(tc.replacement)))
-		if actual != tc.output {
-			t.Errorf("%q.ReplaceAll(%q,%q) = %q; want %q",
-				tc.pattern, tc.input, tc.replacement, actual, tc.output)
+		if utf8.ValidString(tc.input) {
+			actual = string(re.ReplaceAll([]byte(tc.input), []byte(tc.replacement)))
+			if actual != tc.output {
+				t.Errorf("%q.ReplaceAll(%q,%q) = %q; want %q",
+					tc.pattern, tc.input, tc.replacement, actual, tc.output)
+			}
 		}
 	}
 }
@@ -305,11 +308,12 @@ func TestReplaceAllLiteral(t *testing.T) {
 			t.Errorf("%q.ReplaceAllLiteralString(%q,%q) = %q; want %q",
 				tc.pattern, tc.input, tc.replacement, actual, tc.output)
 		}
-		// now try bytes
-		actual = string(re.ReplaceAllLiteral([]byte(tc.input), []byte(tc.replacement)))
-		if actual != tc.output {
-			t.Errorf("%q.ReplaceAllLiteral(%q,%q) = %q; want %q",
-				tc.pattern, tc.input, tc.replacement, actual, tc.output)
+		if utf8.ValidString(tc.input) {
+			actual = string(re.ReplaceAllLiteral([]byte(tc.input), []byte(tc.replacement)))
+			if actual != tc.output {
+				t.Errorf("%q.ReplaceAllLiteral(%q,%q) = %q; want %q",
+					tc.pattern, tc.input, tc.replacement, actual, tc.output)
+			}
 		}
 	}
 
@@ -325,11 +329,12 @@ func TestReplaceAllLiteral(t *testing.T) {
 			t.Errorf("%q.ReplaceAllLiteralString(%q,%q) = %q; want %q",
 				tc.pattern, tc.input, tc.replacement, actual, tc.output)
 		}
-		// now try bytes
-		actual = string(re.ReplaceAllLiteral([]byte(tc.input), []byte(tc.replacement)))
-		if actual != tc.output {
-			t.Errorf("%q.ReplaceAllLiteral(%q,%q) = %q; want %q",
-				tc.pattern, tc.input, tc.replacement, actual, tc.output)
+		if utf8.ValidString(tc.input) {
+			actual = string(re.ReplaceAllLiteral([]byte(tc.input), []byte(tc.replacement)))
+			if actual != tc.output {
+				t.Errorf("%q.ReplaceAllLiteral(%q,%q) = %q; want %q",
+					tc.pattern, tc.input, tc.replacement, actual, tc.output)
+			}
 		}
 	}
 }
@@ -346,11 +351,12 @@ func TestReplaceAllFunc(t *testing.T) {
 			t.Errorf("%q.ReplaceFunc(%q,fn) = %q; want %q",
 				tc.pattern, tc.input, actual, tc.output)
 		}
-		// now try bytes
-		actual = string(re.ReplaceAllFunc([]byte(tc.input), func(s []byte) []byte { return []byte(tc.replacement(string(s))) }))
-		if actual != tc.output {
-			t.Errorf("%q.ReplaceFunc(%q,fn) = %q; want %q",
-				tc.pattern, tc.input, actual, tc.output)
+		if utf8.ValidString(tc.input) {
+			actual = string(re.ReplaceAllFunc([]byte(tc.input), func(s []byte) []byte { return []byte(tc.replacement(string(s))) }))
+			if actual != tc.output {
+				t.Errorf("%q.ReplaceFunc(%q,fn) = %q; want %q",
+					tc.pattern, tc.input, actual, tc.output)
+			}
 		}
 	}
 }

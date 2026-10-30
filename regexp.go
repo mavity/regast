@@ -17,9 +17,9 @@
 // about this property, see https://swtch.com/~rsc/regexp/regexp1.html
 // or any book about automata theory.
 //
-// All characters are UTF-8-encoded code points.
-// Following [utf8.DecodeRune], each byte of an invalid UTF-8 sequence
-// is treated as if it encoded utf8.RuneError (U+FFFD).
+// String matching uses UTF-8-encoded code points. Byte matching decodes valid
+// UTF-8 code points and represents each invalid byte with a distinct internal
+// symbol. Matches and captures always report byte offsets into the input.
 //
 // There are 24 methods of [Regexp] that match a regular expression and identify
 // the matched text. Their names are matched by this regular expression:
@@ -130,6 +130,13 @@ func Compile(expr string) (*Regexp, error) {
 	return compile(expr, syntax.Perl, false)
 }
 
+// CompileBytes parses a byte-oriented regular expression. Invalid UTF-8 bytes
+// in the pattern are preserved as distinct symbols and can match the
+// corresponding invalid bytes in byte-slice input.
+func CompileBytes(pattern []byte) (*Regexp, error) {
+	return compileBytes(pattern, syntax.Perl, false)
+}
+
 // CompilePOSIX is like [Compile] but restricts the regular expression
 // to POSIX ERE (egrep) syntax and changes the match semantics to
 // leftmost-longest.
@@ -153,6 +160,12 @@ func CompilePOSIX(expr string) (*Regexp, error) {
 	return compile(expr, syntax.POSIX, true)
 }
 
+// CompilePOSIXBytes is like CompileBytes but uses POSIX syntax and
+// leftmost-longest matching.
+func CompilePOSIXBytes(pattern []byte) (*Regexp, error) {
+	return compileBytes(pattern, syntax.POSIX, true)
+}
+
 // Longest makes future searches prefer the leftmost-longest match.
 // That is, when matching against text, the regast returns a match that
 // begins as early as possible in the input (leftmost), and among those
@@ -164,10 +177,30 @@ func (re *Regexp) Longest() {
 }
 
 func compile(expr string, mode syntax.Flags, longest bool) (*Regexp, error) {
-	re, err := syntax.Parse(expr, mode)
+	var (
+		re  *syntax.Regexp
+		err error
+	)
+	if utf8.ValidString(expr) {
+		re, err = syntax.ParseBytes([]byte(expr), mode)
+	} else {
+		re, err = syntax.Parse(expr, mode)
+	}
 	if err != nil {
 		return nil, err
 	}
+	return compileParsed(expr, longest, re)
+}
+
+func compileBytes(pattern []byte, mode syntax.Flags, longest bool) (*Regexp, error) {
+	re, err := syntax.ParseBytes(pattern, mode)
+	if err != nil {
+		return nil, err
+	}
+	return compileParsed(string(pattern), longest, re)
+}
+
+func compileParsed(expr string, longest bool, re *syntax.Regexp) (*Regexp, error) {
 	maxCap := re.MaxCap()
 	capNames := re.CapNames()
 
@@ -278,7 +311,7 @@ func minInputLen(re *syntax.Regexp) int {
 	case syntax.OpLiteral:
 		l := 0
 		for _, r := range re.Rune {
-			if r == utf8.RuneError {
+			if syntax.IsInvalidByteRune(r) || r == utf8.RuneError {
 				l++
 			} else {
 				l += utf8.RuneLen(r)
@@ -425,7 +458,7 @@ type inputBytes struct {
 
 func (i *inputBytes) step(pos int) (rune, int) {
 	if pos < len(i.str) {
-		return utf8.DecodeRune(i.str[pos:])
+		return decodeByteRune(i.str[pos:])
 	}
 	return endOfText, 0
 }
@@ -446,13 +479,25 @@ func (i *inputBytes) context(pos int) lazyFlag {
 	r1, r2 := endOfText, endOfText
 	// 0 < pos && pos <= len(i.str)
 	if uint(pos-1) < uint(len(i.str)) {
-		r1, _ = utf8.DecodeLastRune(i.str[:pos])
+		var width int
+		r1, width = utf8.DecodeLastRune(i.str[:pos])
+		if r1 == utf8.RuneError && width == 1 {
+			r1 = syntax.InvalidByteRuneBase + rune(i.str[pos-1])
+		}
 	}
 	// 0 <= pos && pos < len(i.str)
 	if uint(pos) < uint(len(i.str)) {
-		r2, _ = utf8.DecodeRune(i.str[pos:])
+		r2, _ = decodeByteRune(i.str[pos:])
 	}
 	return newLazyFlag(r1, r2)
+}
+
+func decodeByteRune(src []byte) (rune, int) {
+	r, width := utf8.DecodeRune(src)
+	if r == utf8.RuneError && width == 1 {
+		return syntax.InvalidByteRuneBase + rune(src[0]), 1
+	}
+	return r, width
 }
 
 // inputReader scans a RuneReader.
@@ -625,7 +670,7 @@ func (re *Regexp) replaceAll(bsrc []byte, src string, nmatch int, repl func(dst 
 		// Advance past this match; always advance at least one character.
 		var width int
 		if bsrc != nil {
-			_, width = utf8.DecodeRune(bsrc[searchPos:])
+			_, width = decodeByteRune(bsrc[searchPos:])
 		} else {
 			_, width = utf8.DecodeRuneInString(src[searchPos:])
 		}

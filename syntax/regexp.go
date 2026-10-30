@@ -14,17 +14,30 @@ import (
 	"unicode"
 )
 
+// InvalidByteRuneBase starts the internal rune range used to represent invalid
+// UTF-8 bytes in byte-oriented regexp patterns and subjects.
+const InvalidByteRuneBase rune = 0x110000
+
+// InvalidByteRuneMax is the largest internal rune used for invalid bytes.
+const InvalidByteRuneMax rune = InvalidByteRuneBase + 0xff
+
+// IsInvalidByteRune reports whether r is an internal invalid-byte symbol.
+func IsInvalidByteRune(r rune) bool {
+	return InvalidByteRuneBase <= r && r <= InvalidByteRuneMax
+}
+
 // A Regexp is a node in a regular expression syntax tree.
 type Regexp struct {
-	Op       Op // operator
-	Flags    Flags
-	Sub      []*Regexp  // subexpressions, if any
-	Sub0     [1]*Regexp // storage for short Sub
-	Rune     []rune     // matched runes, for OpLiteral, OpCharClass
-	Rune0    [2]rune    // storage for short Rune
-	Min, Max int        // min, max for OpRepeat
-	Cap      int        // capturing index, for OpCapture
-	Name     string     // capturing name, for OpCapture
+	Op           Op // operator
+	Flags        Flags
+	allowInvalid bool
+	Sub          []*Regexp  // subexpressions, if any
+	Sub0         [1]*Regexp // storage for short Sub
+	Rune         []rune     // matched runes, for OpLiteral, OpCharClass
+	Rune0        [2]rune    // storage for short Rune
+	Min, Max     int        // min, max for OpRepeat
+	Cap          int        // capturing index, for OpCapture
+	Name         string     // capturing name, for OpCapture
 }
 
 //go:generate stringer -type Op -trimprefix Op
@@ -264,7 +277,11 @@ func writeRegexp(b *strings.Builder, re *Regexp, f printFlags, flags map[*Regexp
 	default:
 		b.WriteString("<invalid op" + strconv.Itoa(int(re.Op)) + ">")
 	case OpNoMatch:
-		b.WriteString(`[^\x00-\x{10FFFF}]`)
+		if re.allowInvalid {
+			b.WriteString(`[^\x00-\x{1100FF}]`)
+		} else {
+			b.WriteString(`[^\x00-\x{10FFFF}]`)
+		}
 	case OpEmptyMatch:
 		b.WriteString(`(?:)`)
 	case OpLiteral:
@@ -278,9 +295,15 @@ func writeRegexp(b *strings.Builder, re *Regexp, f printFlags, flags map[*Regexp
 		}
 		b.WriteRune('[')
 		if len(re.Rune) == 0 {
-			b.WriteString(`^\x00-\x{10FFFF}`)
-		} else if re.Rune[0] == 0 && re.Rune[len(re.Rune)-1] == unicode.MaxRune && len(re.Rune) > 2 {
-			// Contains 0 and MaxRune. Probably a negated class.
+			if re.allowInvalid {
+				b.WriteString(`^\x00-\x{1100FF}`)
+			} else {
+				b.WriteString(`^\x00-\x{10FFFF}`)
+			}
+		} else if re.Rune[0] == 0 &&
+			(re.Rune[len(re.Rune)-1] == unicode.MaxRune || re.Rune[len(re.Rune)-1] == InvalidByteRuneMax) &&
+			len(re.Rune) > 2 {
+			// Contains 0 and the maximum input rune. Probably a negated class.
 			// Print the gaps.
 			b.WriteRune('^')
 			for i := 1; i < len(re.Rune)-1; i += 2 {
@@ -398,6 +421,12 @@ func (re *Regexp) String() string {
 const meta = `\.+*?()|[]{}^$`
 
 func escape(b *strings.Builder, r rune, force bool) {
+	if IsInvalidByteRune(r) {
+		b.WriteString(`\x{`)
+		b.WriteString(strconv.FormatInt(int64(r), 16))
+		b.WriteString(`}`)
+		return
+	}
 	if unicode.IsPrint(r) {
 		if strings.ContainsRune(meta, r) || force {
 			b.WriteRune('\\')
