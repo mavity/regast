@@ -22,6 +22,12 @@ import (
 // A job is an entry on the backtracker's job stack. It holds
 // the instruction pc and the position in the input.
 type job struct {
+	pc  uint32
+	arg bool
+	pos int
+}
+
+type nodeJob struct {
 	pc   uint32
 	arg  bool
 	pos  int
@@ -140,20 +146,7 @@ const (
 	visitedBits        = 32
 	maxBacktrackProg   = 500        // len(prog.Inst) <= max
 	maxBacktrackVector = 256 * 1024 // bit vector size <= max (bits)
-
-	// Page-table block matrix geometry. The text coordinate space is sliced
-	// into uniform 512-byte windows; each window is backed by a dense bit block
-	// allocated lazily on first touch, so unvisited gaps cost zero memory.
-	rowShift = 9   // 2^9 = 512 bytes per block window
-	rowMask  = 511 // offset mask within a block window
 )
-
-// bitStateBlock is a dense, localized visited-bitset for a single 512-byte text
-// window. It holds 512*progLen bits, indexed by (offset-within-window, pc).
-type bitStateBlock struct {
-	bits       []uint32
-	generation uint32
-}
 
 // nodeVisitKey uniquely identifies a node-region execution state for the
 // deduplicating prune: instruction, position, the exact bound chain (frame),
@@ -167,20 +160,12 @@ type nodeVisitKey struct {
 
 // bitState holds state for the backtracker.
 type bitState struct {
-	end        int
-	cap        []int
-	matchcap   []int
-	jobs       []job
-	generation uint32
-
-	// Page-table block matrix replacing the flat visited bitvector. blocks is a
-	// sparse index of 512-byte text pages; each page is backed by a dense
-	// (512 * progLen)-bit block only once a thread first enters that window, so
-	// large unvisited text gaps consume zero bits. progLen and wordsPerBlock are
-	// cached per search to keep lazy block allocation and bit addressing fast.
-	blocks        []*bitStateBlock
-	wordsPerBlock uint32
-	progLen       uint32
+	end      int
+	cap      []int
+	matchcap []int
+	jobs     []job
+	nodeJobs []nodeJob
+	visited  []uint32
 
 	// regast node-group extension:
 	am          *astMap                   // structural map of the input (nil for plain matching)
@@ -206,30 +191,7 @@ func newBitState() *bitState {
 func freeBitState(b *bitState) {
 	b.inputs.clear()
 	b.am = nil
-	if b.exceedsPageCacheLimit() {
-		clear(b.blocks[:cap(b.blocks)])
-		b.blocks = nil
-	}
 	bitStatePool.Put(b)
-}
-
-// Keep reusable page storage within the memory budget of the flat bit vector.
-func (b *bitState) exceedsPageCacheLimit() bool {
-	const maxWords = maxBacktrackVector / 32
-	const blockWords = 8 // Upper bound for the page-block header.
-	if cap(b.blocks) > maxWords/2 {
-		return true
-	}
-	words := cap(b.blocks) * 2 // Upper bound: two uint32 words per pointer.
-	for _, block := range b.blocks[:cap(b.blocks)] {
-		if block != nil {
-			if words > maxWords-blockWords || cap(block.bits) > maxWords-words-blockWords {
-				return true
-			}
-			words += cap(block.bits) + blockWords
-		}
-	}
-	return false
 }
 
 // maxBitStateLen returns the maximum length of a string to search with
@@ -253,37 +215,28 @@ func shouldBacktrack(prog *syntax.Prog) bool {
 func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 	b.end = end
 
-	if cap(b.jobs) == 0 {
+	if prog.HasNodeGroup {
+		if cap(b.nodeJobs) == 0 {
+			b.nodeJobs = make([]nodeJob, 0, 256)
+		} else {
+			b.nodeJobs = b.nodeJobs[:0]
+		}
+	} else if cap(b.jobs) == 0 {
 		b.jobs = make([]job, 0, 256)
 	} else {
 		b.jobs = b.jobs[:0]
 	}
 
-	// Page-table block matrix. Cache the per-block geometry, then reset the
-	// sparse page index to all-nil so each window's dense block is (re)allocated
-	// lazily on first touch. This replaces the old flat
-	// make([]uint32, visitedSize, maxBacktrackVector/visitedBits) allocation,
-	// which panicked (len > cap) once a node-group program forced the
-	// backtracker past the 256KB vector cap on a large input.
-	b.progLen = uint32(len(prog.Inst))
-	bitsPerBlock := uint32(1<<rowShift) * b.progLen
-	b.wordsPerBlock = (bitsPerBlock + visitedBits - 1) / visitedBits
-
-	numBlocks := (end >> rowShift) + 1
-	if b.generation == ^uint32(0) {
-		for _, block := range b.blocks[:cap(b.blocks)] {
-			if block != nil {
-				block.generation = 0
-			}
+	if prog.HasNodeGroup {
+		b.visited = b.visited[:0]
+	} else {
+		visitedSize := (len(prog.Inst)*(end+1) + visitedBits - 1) / visitedBits
+		if cap(b.visited) < visitedSize {
+			b.visited = make([]uint32, visitedSize, maxBacktrackVector/visitedBits)
+		} else {
+			b.visited = b.visited[:visitedSize]
+			clear(b.visited)
 		}
-		b.generation = 1
-	} else {
-		b.generation++
-	}
-	if cap(b.blocks) < numBlocks {
-		b.blocks = make([]*bitStateBlock, numBlocks)
-	} else {
-		b.blocks = b.blocks[:numBlocks]
 	}
 
 	if cap(b.cap) < ncap {
@@ -304,53 +257,29 @@ func (b *bitState) reset(prog *syntax.Prog, end int, ncap int) {
 		b.matchcap[i] = -1
 	}
 
-	// Node-group state: a pooled, append-only frame arena plus interning and a
-	// node-region visited set. All reused across searches (capacity retained).
-	b.frames = b.frames[:0]
-	if b.frameIntern == nil {
-		b.frameIntern = make(map[uint64]int32)
-	} else {
-		clear(b.frameIntern)
-	}
-	if b.nodeVisited == nil {
-		b.nodeVisited = make(map[nodeVisitKey]struct{})
-	} else {
-		clear(b.nodeVisited)
+	if prog.HasNodeGroup {
+		b.frames = b.frames[:0]
+		if b.frameIntern == nil {
+			b.frameIntern = make(map[uint64]int32)
+		} else {
+			clear(b.frameIntern)
+		}
+		if b.nodeVisited == nil {
+			b.nodeVisited = make(map[nodeVisitKey]struct{})
+		} else {
+			clear(b.nodeVisited)
+		}
 	}
 }
 
 // shouldVisit reports whether the combination of (pc, pos) has not
-// been visited yet, recording it if new. It uses the page-table block matrix:
-// the dense bit block for the 512-byte window containing pos is allocated
-// lazily on first touch, giving O(1) lookups with sparse memory.
+// been visited yet.
 func (b *bitState) shouldVisit(pc uint32, pos int) bool {
-	blockIdx := pos >> rowShift
-	offset := uint32(pos & rowMask)
-
-	block := b.blocks[blockIdx]
-	if block == nil {
-		block = &bitStateBlock{
-			bits:       make([]uint32, b.wordsPerBlock),
-			generation: b.generation,
-		}
-		b.blocks[blockIdx] = block
-	} else if block.generation != b.generation {
-		if cap(block.bits) < int(b.wordsPerBlock) {
-			block.bits = make([]uint32, b.wordsPerBlock)
-		} else {
-			block.bits = block.bits[:b.wordsPerBlock]
-			clear(block.bits)
-		}
-		block.generation = b.generation
-	}
-
-	bitIdx := offset*b.progLen + pc
-	word := bitIdx >> 5
-	mask := uint32(1) << (bitIdx & 31)
-	if block.bits[word]&mask != 0 {
+	n := uint(int(pc)*(b.end+1) + pos)
+	if b.visited[n/visitedBits]&(1<<(n&(visitedBits-1))) != 0 {
 		return false
 	}
-	block.bits[word] |= mask
+	b.visited[n/visitedBits] |= 1 << (n & (visitedBits - 1))
 	return true
 }
 
@@ -375,35 +304,152 @@ func (b *bitState) shouldVisitNode(pc uint32, pos int, nctx nodeCtx) bool {
 	return true
 }
 
-// push pushes (pc, pos, arg) onto the job stack if it should be visited. Plain
-// programs use the flat (pc,pos) bitvector; whenever the input has a structural
-// map (b.am != nil) every state — even outside a node-group — carries the
-// per-character cursor flags, so it must use the frame-keyed node-visited set
-// to deduplicate correctly.
+// push pushes an AST-aware job if it has not already been visited.
 func (b *bitState) push(re *Regexp, pc uint32, pos int, arg bool, nctx nodeCtx) {
-	// Only check the visited prune when arg is false.
-	// When arg is true, we are continuing a previous visit.
 	if re.prog.Inst[pc].Op == syntax.InstFail {
 		return
 	}
-	if !arg {
-		if b.am != nil {
-			if !b.shouldVisitNode(pc, pos, nctx) {
-				return
-			}
-		} else if !b.shouldVisit(pc, pos) {
-			return
-		}
+	if !arg && !b.shouldVisitNode(pc, pos, nctx) {
+		return
 	}
-	b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos, nctx: nctx})
+	b.nodeJobs = append(b.nodeJobs, nodeJob{pc: pc, arg: arg, pos: pos, nctx: nctx})
 }
 
 func isPatternSpace(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
 }
 
-// tryBacktrack runs a backtracking search starting at pos.
+// tryBacktrack runs the plain or AST-aware backtracking path.
 func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
+	if b.am != nil {
+		return re.tryBacktrackNode(b, i, pc, pos)
+	}
+	return re.tryBacktrackPlain(b, i, pc, pos)
+}
+
+func (b *bitState) pushPlain(re *Regexp, pc uint32, pos int, arg bool) {
+	if re.prog.Inst[pc].Op != syntax.InstFail && (arg || b.shouldVisit(pc, pos)) {
+		b.jobs = append(b.jobs, job{pc: pc, arg: arg, pos: pos})
+	}
+}
+
+func (re *Regexp) tryBacktrackPlain(b *bitState, i input, pc uint32, pos int) bool {
+	longest := re.longest
+
+	b.pushPlain(re, pc, pos, false)
+	for len(b.jobs) > 0 {
+		l := len(b.jobs) - 1
+		pc := b.jobs[l].pc
+		pos := b.jobs[l].pos
+		arg := b.jobs[l].arg
+		b.jobs = b.jobs[:l]
+
+		goto Skip
+	CheckAndLoop:
+		if !b.shouldVisit(pc, pos) {
+			continue
+		}
+	Skip:
+
+		inst := &re.prog.Inst[pc]
+		switch inst.Op {
+		default:
+			panic("bad inst")
+		case syntax.InstFail:
+			panic("unexpected InstFail")
+		case syntax.InstAlt:
+			if arg {
+				arg = false
+				pc = inst.Arg
+				goto CheckAndLoop
+			}
+			b.pushPlain(re, pc, pos, true)
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstAltMatch:
+			switch re.prog.Inst[inst.Out].Op {
+			case syntax.InstRune, syntax.InstRune1, syntax.InstRuneAny, syntax.InstRuneAnyNotNL:
+				b.pushPlain(re, inst.Arg, pos, false)
+				pc = inst.Arg
+				pos = b.end
+				goto CheckAndLoop
+			}
+			b.pushPlain(re, inst.Out, b.end, false)
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstRune:
+			r, width := i.step(pos)
+			if !inst.MatchRune(r) {
+				continue
+			}
+			pos += width
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstRune1:
+			r, width := i.step(pos)
+			if r != inst.Rune[0] {
+				continue
+			}
+			pos += width
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstRuneAnyNotNL:
+			r, width := i.step(pos)
+			if r == '\n' || r == endOfText {
+				continue
+			}
+			pos += width
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstRuneAny:
+			r, width := i.step(pos)
+			if r == endOfText {
+				continue
+			}
+			pos += width
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstCapture:
+			if arg {
+				b.cap[inst.Arg] = pos
+				continue
+			}
+			if inst.Arg < uint32(len(b.cap)) {
+				b.pushPlain(re, pc, b.cap[inst.Arg], true)
+				b.cap[inst.Arg] = pos
+			}
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstEmptyWidth:
+			flag := i.context(pos)
+			if !flag.match(syntax.EmptyOp(inst.Arg)) {
+				continue
+			}
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstNop:
+			pc = inst.Out
+			goto CheckAndLoop
+		case syntax.InstMatch:
+			if len(b.cap) == 0 {
+				return true
+			}
+			if len(b.cap) > 1 {
+				b.cap[1] = pos
+			}
+			if old := b.matchcap[1]; old == -1 || (longest && pos > 0 && pos > old) {
+				copy(b.matchcap, b.cap)
+			}
+			if !longest || pos == b.end {
+				return true
+			}
+		}
+	}
+
+	return longest && len(b.matchcap) > 1 && b.matchcap[1] >= 0
+}
+
+func (re *Regexp) tryBacktrackNode(b *bitState, i input, pc uint32, pos int) bool {
 	longest := re.longest
 
 	// Per-start work counter. Frame-keyed dedup makes realistic node patterns
@@ -415,14 +461,14 @@ func (re *Regexp) tryBacktrack(b *bitState, i input, pc uint32, pos int) bool {
 	b.steps = 0
 
 	b.push(re, pc, pos, false, noNode())
-	for len(b.jobs) > 0 {
-		l := len(b.jobs) - 1
+	for len(b.nodeJobs) > 0 {
+		l := len(b.nodeJobs) - 1
 		// Pop job off the stack.
-		pc := b.jobs[l].pc
-		pos := b.jobs[l].pos
-		arg := b.jobs[l].arg
-		nctx := b.jobs[l].nctx
-		b.jobs = b.jobs[:l]
+		pc := b.nodeJobs[l].pc
+		pos := b.nodeJobs[l].pos
+		arg := b.nodeJobs[l].arg
+		nctx := b.nodeJobs[l].nctx
+		b.nodeJobs = b.nodeJobs[:l]
 
 		if b.maxSteps > 0 {
 			b.steps++

@@ -100,21 +100,59 @@ func TestByteMatchesAgreeWithRegexpOnValidUTF8(t *testing.T) {
 	}
 }
 
-func TestBitStateReusesPageBitsAcrossSearches(t *testing.T) {
+func TestBitStateReusesFlatBitsAcrossSearches(t *testing.T) {
 	b := &bitState{}
 	prog := &syntax.Prog{Inst: make([]syntax.Inst, 8)}
 	b.reset(prog, 0, 0)
 	if !b.shouldVisit(0, 0) || b.shouldVisit(0, 0) {
-		t.Fatal("first search did not mark a page bit")
+		t.Fatal("first search did not mark a visited bit")
 	}
-	block := b.blocks[0]
+	visited := &b.visited[0]
 
 	b.reset(prog, 0, 0)
-	if b.blocks[0] != block {
-		t.Fatal("page block was not reused")
+	if &b.visited[0] != visited {
+		t.Fatal("flat visited vector was not reused")
 	}
 	if !b.shouldVisit(0, 0) || b.shouldVisit(0, 0) {
-		t.Fatal("page bits were not reset for the next search")
+		t.Fatal("visited bits were not reset for the next search")
+	}
+}
+
+func TestNodeGroupStateIsConditional(t *testing.T) {
+	plain := MustCompile(`a+`).prog
+	nodeGroup := MustCompile(`⦅a+⦆`).prog
+	if plain.HasNodeGroup || !nodeGroup.HasNodeGroup {
+		t.Fatal("test programs do not distinguish plain and node-group patterns")
+	}
+
+	b := &bitState{}
+	b.reset(plain, 1, 0)
+	if b.frameIntern != nil || b.nodeVisited != nil || cap(b.nodeJobs) != 0 {
+		t.Fatal("plain pattern initialized AST state")
+	}
+	if len(b.visited) == 0 {
+		t.Fatal("plain pattern did not allocate its flat visited vector")
+	}
+
+	b.reset(nodeGroup, 100_000, 0)
+	if len(b.visited) != 0 {
+		t.Fatalf("node-group pattern allocated %d plain visited words", len(b.visited))
+	}
+	if b.frameIntern == nil || b.nodeVisited == nil || cap(b.nodeJobs) == 0 {
+		t.Fatal("node-group pattern did not initialize AST state")
+	}
+	b.frameIntern[1] = 2
+	b.nodeVisited[nodeVisitKey{pc: 1, pos: 2}] = struct{}{}
+	b.frames = append(b.frames, nodeFrame{end: 2, parent: -1})
+
+	b.reset(plain, 1, 0)
+	if len(b.frameIntern) != 1 || len(b.nodeVisited) != 1 || len(b.frames) != 1 {
+		t.Fatal("plain pattern reset AST state")
+	}
+
+	b.reset(nodeGroup, 1, 0)
+	if len(b.frameIntern) != 0 || len(b.nodeVisited) != 0 || len(b.frames) != 0 {
+		t.Fatal("node-group reset retained state from the previous search")
 	}
 }
 
